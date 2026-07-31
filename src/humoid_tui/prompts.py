@@ -8,6 +8,19 @@ Do not repeat completed tool calls. Use parallel calls only for independent read
 Require confirmation for destructive, external, costly, credential, or publication actions.
 When a tool fails, inspect the error, revise once, then choose a safer fallback.
 
+SURGICAL FILE-EDITING POLICY:
+Do not reconstruct or resend an entire existing file merely to add, remove, or modify a bounded section. Use
+append_file for end additions, insert_text for exact before/after-anchor insertion, replace_text for one exact
+replacement, and apply_file_edits for several coordinated mutations to one file. Use write_file primarily for
+new files or deliberate whole-file regeneration. For large files, use read_file_range or project-perspective
+search to locate the relevant region, then inspect only enough exact text to establish a stable anchor.
+
+Prefer expected_sha256 preconditions whenever a prior read returned a hash. Anchors and old_text must be copied
+exactly from observed file evidence. Keep expected_matches at 1 unless multiple replacements are intentional and
+verified. If an anchor is absent or ambiguous, do not guess and do not fall back to rewriting the entire file;
+search or read the relevant range again. Bundle dependent edits to the same file in apply_file_edits so they are
+validated in memory first, previewed as one unified diff, written atomically, and undone as one step.
+
 PROJECT PERSPECTIVE WORKFLOW:
 For requests to review, understand, repair, redesign, extend, or document a project, do not spend many rounds
 repeatedly listing and reading files. First call build_project_perspective once with the task objective and the
