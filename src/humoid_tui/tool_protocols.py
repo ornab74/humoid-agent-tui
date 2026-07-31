@@ -86,30 +86,136 @@ class ProtocolError(ValueError):
     pass
 
 
-def _jsonish(value: str) -> Any:
-    value = value.strip()
-    if not value:
-        return {}
+_FENCE = re.compile(
+    r"^\s*```(?:json|json5|javascript|tool_call)?\s*(.*?)\s*```\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_json_wrappers(value: str) -> str:
+    """Remove harmless wrappers commonly emitted by compatible model servers."""
+
+    value = value.strip().lstrip("\ufeff")
+    fenced = _FENCE.match(value)
+    if fenced:
+        value = fenced.group(1).strip()
+
+    for opening, closing in (
+        ("<tool_call>", "</tool_call>"),
+        ("<|tool_call|>", "<|/tool_call|>"),
+    ):
+        if value.startswith(opening) and value.endswith(closing):
+            value = value[len(opening):-len(closing)].strip()
+
+    prefix = re.match(
+        r"^(?:arguments?|parameters?|params?)\s*[:=]\s*(.+)$",
+        value,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if prefix:
+        value = prefix.group(1).strip()
+
+    return value
+
+
+def _json_loads(value: str) -> Any:
+    """Decode JSON while tolerating literal control characters in strings."""
+
     try:
         return json.loads(value)
     except json.JSONDecodeError:
-        pass
+        return json.loads(value, strict=False)
+
+
+def _unwrap_json_strings(value: Any, *, depth: int = 4) -> Any:
+    """Unwrap providers that double-encode function argument objects."""
+
+    current = value
+    for _ in range(depth):
+        if not isinstance(current, str):
+            break
+        candidate = _strip_json_wrappers(current)
+        if not candidate:
+            return {}
+        try:
+            decoded = _json_loads(candidate)
+        except json.JSONDecodeError:
+            break
+        if decoded == current:
+            break
+        current = decoded
+    return current
+
+
+def _last_embedded_json_object(value: str) -> dict[str, Any] | None:
+    """Recover the last complete object from cumulative or duplicated deltas.
+
+    A few OpenAI-compatible servers stream cumulative ``arguments`` snapshots.
+    Concatenating those snapshots can produce text such as ``{...}{...}`` or a
+    partial prefix followed by a complete object.  Scanning every object start
+    lets us select the newest complete mapping without evaluating model text.
+    """
+
+    decoder = json.JSONDecoder(strict=False)
+    objects: list[dict[str, Any]] = []
+    for index, character in enumerate(value):
+        if character != "{":
+            continue
+        try:
+            decoded, _ = decoder.raw_decode(value, index)
+        except json.JSONDecodeError:
+            continue
+        decoded = _unwrap_json_strings(decoded)
+        if isinstance(decoded, dict):
+            objects.append(decoded)
+    return objects[-1] if objects else None
+
+
+def _jsonish(value: str) -> Any:
+    value = _strip_json_wrappers(value)
+    if not value:
+        return {}
+
+    first_error: json.JSONDecodeError | None = None
+    candidates = [value]
+
     # Conservative repair for common local-model output. No eval.
     repaired = re.sub(r",\s*([}\]])", r"\1", value)
     repaired = re.sub(r"\bTrue\b", "true", repaired)
     repaired = re.sub(r"\bFalse\b", "false", repaired)
     repaired = re.sub(r"\bNone\b", "null", repaired)
-    try:
-        return json.loads(repaired)
-    except json.JSONDecodeError:
-        pass
+    if repaired != value:
+        candidates.append(repaired)
+
+    for candidate in candidates:
+        try:
+            decoded = _unwrap_json_strings(_json_loads(candidate))
+            return decoded
+        except json.JSONDecodeError as exc:
+            if first_error is None:
+                first_error = exc
+
+    for candidate in candidates:
+        embedded = _last_embedded_json_object(candidate)
+        if embedded is not None:
+            return embedded
+
     try:
         literal = ast.literal_eval(value)
+        literal = _unwrap_json_strings(literal)
         if isinstance(literal, (dict, list, str, int, float, bool, type(None))):
             return literal
     except (ValueError, SyntaxError):
         pass
-    raise ProtocolError("Tool arguments are not valid JSON or a safe Python literal")
+
+    preview = value[:180].replace("\n", "\\n").replace("\r", "\\r")
+    location = ""
+    if first_error is not None:
+        location = f" at line {first_error.lineno} column {first_error.colno}"
+    raise ProtocolError(
+        "Tool arguments are not valid JSON or a safe Python literal"
+        f"{location}; preview={preview!r}"
+    )
 
 
 def _new_call(name: str, arguments: Any, *, provider: str, model: str,
@@ -119,6 +225,7 @@ def _new_call(name: str, arguments: Any, *, provider: str, model: str,
         raise ProtocolError(f"Invalid tool name: {name!r}")
     if isinstance(arguments, str):
         arguments = _jsonish(arguments)
+    arguments = _unwrap_json_strings(arguments)
     if not isinstance(arguments, dict):
         raise ProtocolError("Tool arguments must normalize to an object")
     return CanonicalToolCall(
@@ -160,7 +267,7 @@ class OpenAIChatProtocol(ToolProtocol):
             calls.append(_new_call(
                 fn.get("name", ""), fn.get("arguments", "{}"),
                 provider=provider, model=model, protocol=self.name,
-                raw=json.dumps(tc, ensure_ascii=False),
+                raw=json.dumps(tc, ensure_ascii=False, default=str),
                 call_id=tc.get("id") or f"call_{i}_{uuid4().hex[:12]}",
             ))
         return calls
@@ -198,12 +305,18 @@ class Gemma4Protocol(ToolProtocol):
               provider: str, model: str) -> list[CanonicalToolCall]:
         if structured:
             # Some Gemma servers already convert the native syntax to OAI deltas.
-            calls = OpenAIChatProtocol().parse(
-                text=text, structured=structured, provider=provider, model=model
-            )
-            for call in calls:
-                call.protocol = f"{self.name}+server-normalized"
-            return calls
+            # If that payload is malformed, continue to the native text fallback
+            # instead of failing the whole adaptive protocol immediately.
+            try:
+                calls = OpenAIChatProtocol().parse(
+                    text=text, structured=structured, provider=provider, model=model
+                )
+            except ProtocolError:
+                calls = []
+            if calls:
+                for call in calls:
+                    call.protocol = f"{self.name}+server-normalized"
+                return calls
         return [
             _new_call(name, self._parse_gemma_args(body), provider=provider,
                       model=model, protocol=self.name, raw=whole, confidence=.98)
@@ -235,12 +348,18 @@ class TaggedJSONProtocol(ToolProtocol):
     def parse(self, *, text: str, structured: list[dict[str, Any]],
               provider: str, model: str) -> list[CanonicalToolCall]:
         if structured:
-            calls = OpenAIChatProtocol().parse(
-                text=text, structured=structured, provider=provider, model=model
-            )
-            for call in calls:
-                call.protocol = f"{self.name}+server-normalized"
-            return calls
+            # Do not let malformed server-normalized arguments block a valid
+            # tagged fallback carried in the assistant text.
+            try:
+                calls = OpenAIChatProtocol().parse(
+                    text=text, structured=structured, provider=provider, model=model
+                )
+            except ProtocolError:
+                calls = []
+            if calls:
+                for call in calls:
+                    call.protocol = f"{self.name}+server-normalized"
+                return calls
         out: list[CanonicalToolCall] = []
         for pattern in self.patterns:
             for match in pattern.finditer(text):
