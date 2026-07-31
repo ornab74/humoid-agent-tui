@@ -206,7 +206,10 @@ class LocalModelManager:
 
     async def launch(self, path: Path, port: int = 8080, context: int = 10000) -> str:
         if self.process and self.process.returncode is None:
-            raise RuntimeError("A local model server is already running")
+            return (
+                f"server already running pid={self.process.pid} port={port}; "
+                "use STOP before launching a different model or context"
+            )
         missing = []
         for module in ("uvicorn", "fastapi", "sse_starlette"):
             try:
@@ -290,7 +293,10 @@ class LocalModelManager:
         try:
             await asyncio.wait_for(self.process.wait(), 10)
         except TimeoutError:
-            self.process.kill()
+            try:
+                self.process.kill()
+            except ProcessLookupError:
+                pass
             await self.process.wait()
         return "local model server stopped"
 
@@ -348,4 +354,13 @@ class LocalModelManager:
         return await asyncio.to_thread(run)
 
     def status_json(self) -> str:
-        return json.dumps({"package": self.package_version(), "models": [p.name for p in self.models()]}, indent=2)
+        running = bool(self.process and self.process.returncode is None)
+        return json.dumps({
+            "package": self.package_version(),
+            "models": [p.name for p in self.models()],
+            "server": {
+                "running": running,
+                "pid": self.process.pid if running else None,
+                "log": str(self.log_path),
+            },
+        }, indent=2)

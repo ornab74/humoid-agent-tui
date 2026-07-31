@@ -509,67 +509,120 @@ class SessionsScreen(NavigableModal):
 class SettingsModelScreen(NavigableModal):
     CSS = """
     SettingsModelScreen { align: center middle; background: #000a; }
-    #settings-dialog { width: 94%; height: 94%; border: round cyan; background: #050b12; padding: 1; }
+    #settings-dialog { width: 92%; height: 94%; border: round cyan; background: #050b12; padding: 1 2; }
+    #settings-title { color: #10d9ed; text-style: bold; margin-top: 1; }
+    #settings-intro, .section-help { color: #91a4b7; margin-bottom: 1; }
+    .settings-section { border: solid #263744; margin-top: 1; padding: 0 1; }
     .line { height: 3; }
-    #hardware { min-height: 5; border: solid #263744; padding: 0 1; }
-    #model-table { height: 8; border: solid #263744; }
+    #active-provider { min-height: 3; background: #0a1822; color: #d9f7ff; padding: 0 1; }
+    #shell-status, #gemma-autostart-status { min-height: 2; color: #b8c7d4; }
+    #hardware { min-height: 7; background: #07111a; padding: 0 1; }
+    #model-table { height: 9; border: solid #263744; }
     #download-progress { height: 1; }
     #download-detail { min-height: 2; color: #10d9ed; }
-    #model-output { min-height: 8; border: solid #263744; padding: 0 1; }
+    #model-output { min-height: 6; border: solid #263744; background: #02070b; padding: 0 1; }
+    #close-settings { margin-top: 1; width: 20; }
     """
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="settings-dialog"):
             yield Button(self.app.tr("back"), id="back-settings")
             yield Static(NAV_HINT, markup=True)
-            yield Label("SETTINGS + LOCAL MODEL MANAGER")
-            yield Static("", id="shell-status")
+            yield Label("SETTINGS & MODEL CONTROL", id="settings-title")
+            yield Static(
+                "Choose the active AI provider, manage local Gemma, and tune runtime behavior. "
+                "Changes marked as persistent are saved to SQLite preferences and .env.",
+                id="settings-intro",
+            )
+
+            yield Label("1  ACTIVE MODEL")
+            yield Static(
+                "Switch between remote GLM 5.2 and local Gemma. Starting Gemma can take a minute on CPU.",
+                classes="section-help",
+            )
             yield Static("", id="active-provider")
             with Horizontal(classes="line"):
-                yield Button("USE REMOTE GLM-5.2", id="use-remote")
-                yield Button("USE LOCAL GEMMA", id="use-local", variant="success")
-            with Horizontal(classes="line"):
-                yield Button("ENABLE SHELL", id="shell-enable", variant="warning")
-                yield Button("DISABLE SHELL", id="shell-disable", variant="error")
-            yield Label("MODEL CONTEXT WINDOWS (tokens)")
-            with Horizontal(classes="line"):
+                yield Button("USE GLM 5.2 (REMOTE)", id="use-remote", variant="primary")
+                yield Button("START + USE GEMMA", id="start-gemma", variant="success")
+
+            with Collapsible(title="2  Local Gemma server", collapsed=False, classes="settings-section"):
+                yield Static(
+                    "Control the llama.cpp server and decide whether it should start automatically when Gemma is selected.",
+                    classes="section-help",
+                )
+                yield Static("", id="gemma-autostart-status")
+                with Horizontal(classes="line"):
+                    yield Button("USE RUNNING GEMMA", id="use-local", variant="success")
+                    yield Button("START SERVER ONLY", id="launch")
+                    yield Button("STOP SERVER", id="stop", variant="error")
+                with Horizontal(classes="line"):
+                    yield Button("ENABLE AUTO-START", id="gemma-autostart-on", variant="success")
+                    yield Button("DISABLE AUTO-START", id="gemma-autostart-off", variant="warning")
+
+            with Collapsible(title="3  Downloaded GGUF models", collapsed=False, classes="settings-section"):
+                yield Static(
+                    "Select a downloaded model, or provide a Hugging Face repository and filename to download one.",
+                    classes="section-help",
+                )
+                yield DataTable(id="model-table", cursor_type="row", zebra_stripes=True)
+                yield Label("Hugging Face repository")
+                yield Input(value="google/gemma-4-E2B-it-qat-q4_0-gguf", id="model-repo")
+                yield Label("GGUF filename / selected local model")
+                yield Input(value="gemma-4-E2B_q4_0-it.gguf", id="model-file")
+                yield ProgressBar(total=100, show_eta=True, id="download-progress")
+                yield Static("Download idle", id="download-detail")
+                with Horizontal(classes="line"):
+                    yield Button("REFRESH MODELS", id="refresh-models")
+                    yield Button("DOWNLOAD", id="download", variant="primary")
+                    yield Button("CANCEL DOWNLOAD", id="cancel-download", variant="error", disabled=True)
+                    yield Button("INSPECT", id="inspect")
+                    yield Button("BENCHMARK", id="benchmark")
+
+            with Collapsible(title="4  Hardware & local runtime", collapsed=True, classes="settings-section"):
+                yield Static(
+                    "Detect acceleration support and manage the optional llama-cpp-python server package.",
+                    classes="section-help",
+                )
+                yield Static("Detecting hardware…", id="hardware")
+                with Horizontal(classes="line"):
+                    yield Button("DETECT AGAIN", id="detect")
+                    yield Button("INSTALL RUNTIME", id="install", variant="success")
+                    yield Button("REINSTALL", id="reinstall", variant="warning")
+                    yield Button("UNINSTALL", id="uninstall", variant="error")
+
+            with Collapsible(title="5  Context windows", collapsed=True, classes="settings-section"):
+                yield Static(
+                    "Larger windows remember more conversation but consume more RAM and run more slowly.",
+                    classes="section-help",
+                )
+                yield Label("Local Gemma context tokens")
                 yield Input(
                     value=str(self.app.settings.humoid_gemma_context_limit),
                     placeholder="Gemma context", id="gemma-context", type="integer",
                 )
+                yield Label("Remote GLM 5.2 context tokens")
                 yield Input(
                     value=str(self.app.settings.humoid_glm_context_limit),
                     placeholder="GLM 5.2 context", id="glm-context", type="integer",
                 )
-                yield Button("APPLY CONTEXT", id="apply-context", variant="primary")
-            yield Static("Detecting hardware…", id="hardware")
-            with Horizontal(classes="line"):
-                yield Button("DETECT HARDWARE", id="detect")
-                yield Button("INSTALL", id="install", variant="success")
-                yield Button("REINSTALL", id="reinstall", variant="warning")
-                yield Button("UNINSTALL", id="uninstall", variant="error")
-            yield Label("Persist setting to .env")
-            with Horizontal(classes="line"):
-                yield Input(placeholder="KEY", id="setting-key")
-                yield Input(placeholder="value", id="setting-value")
-                yield Button("Save", id="save-setting", variant="primary")
-            yield Label("Hugging Face GGUF")
-            yield DataTable(id="model-table", cursor_type="row", zebra_stripes=True)
-            with Horizontal(classes="line"):
-                yield Input(value="google/gemma-4-E2B-it-qat-q4_0-gguf", id="model-repo")
-                yield Input(value="gemma-4-E2B_q4_0-it.gguf", id="model-file")
-            yield ProgressBar(total=100, show_eta=True, id="download-progress")
-            yield Static("Download idle", id="download-detail")
-            with Horizontal(classes="line"):
-                yield Button("REFRESH LIST", id="refresh-models")
-                yield Button("Download", id="download")
-                yield Button("CANCEL DOWNLOAD", id="cancel-download", variant="error", disabled=True)
-                yield Button("Inspect", id="inspect")
-                yield Button("Launch", id="launch", variant="success")
-                yield Button("Stop", id="stop", variant="error")
-                yield Button("Benchmark", id="benchmark")
-                yield Button(self.app.tr("close"), id="close-settings")
+                yield Button("SAVE CONTEXT WINDOWS", id="apply-context", variant="primary")
+
+            with Collapsible(title="6  Safety & advanced preferences", collapsed=True, classes="settings-section"):
+                yield Static("", id="shell-status")
+                with Horizontal(classes="line"):
+                    yield Button("ENABLE SHELL TOOLS", id="shell-enable", variant="warning")
+                    yield Button("DISABLE SHELL TOOLS", id="shell-disable", variant="error")
+                yield Static(
+                    "Advanced: persist any recognized environment setting. Most users do not need this.",
+                    classes="section-help",
+                )
+                yield Input(placeholder="SETTING KEY (for example HUMOID_TEMPERATURE)", id="setting-key")
+                yield Input(placeholder="SETTING VALUE", id="setting-value")
+                yield Button("SAVE ADVANCED SETTING", id="save-setting", variant="primary")
+
+            yield Label("ACTIVITY & RESULTS")
             yield Static("", id="model-output")
+            yield Button(self.app.tr("close"), id="close-settings")
 
     def on_mount(self) -> None:
         self.hardware = None
@@ -582,6 +635,7 @@ class SettingsModelScreen(NavigableModal):
         table.add_column("Size", key="size")
         self.refresh_models()
         self.refresh_shell_status()
+        self.refresh_gemma_autostart()
         self.refresh_active_provider()
         self.run_worker(self.detect(), exclusive=True)
         self.query_one("#back-settings", Button).focus()
@@ -618,6 +672,7 @@ class SettingsModelScreen(NavigableModal):
             f"Backend: {self.hardware.backend}\nDevice: {self.hardware.name}\n"
             f"CUDA: {self.hardware.cuda_version or 'n/a'}\n"
             f"llama-cpp-python: {manager.package_version()}\nRecommended: {wheel}"
+            f"\nLocal server:\n{manager.status_json()}"
         )
 
     def output(self, text: object) -> None:
@@ -626,8 +681,18 @@ class SettingsModelScreen(NavigableModal):
     def refresh_active_provider(self) -> None:
         cfg = self.app.harness.provider.cfg if self.app.harness else self.app.settings.provider()
         self.query_one("#active-provider", Static).update(
-            f"Active model: {cfg.model} ({cfg.name})"
+            f"Active provider: {cfg.name}\nModel: {cfg.model}\nEndpoint: {cfg.base_url}"
         )
+
+    def refresh_gemma_autostart(self) -> None:
+        enabled = self.app.settings.humoid_gemma_autostart
+        self.query_one("#gemma-autostart-status", Static).update(
+            "Auto-start is ENABLED: Gemma starts when the saved provider is llama.cpp."
+            if enabled else
+            "Auto-start is DISABLED: start Gemma manually when you need it."
+        )
+        self.query_one("#gemma-autostart-on", Button).disabled = enabled
+        self.query_one("#gemma-autostart-off", Button).disabled = not enabled
 
     async def activate_provider(self, name: str, path: Path) -> None:
         remote = self.query_one("#use-remote", Button)
@@ -646,8 +711,8 @@ class SettingsModelScreen(NavigableModal):
                 await manager.wait_until_ready()
                 self.app.settings.llamacpp_model = path.stem
                 self.app.settings.llamacpp_base_url = "http://127.0.0.1:8080/v1"
-                self.app.env_store.set("LLAMACPP_MODEL", path.stem)
-                self.app.env_store.set("LLAMACPP_BASE_URL", self.app.settings.llamacpp_base_url)
+                self.app.save_preference("LLAMACPP_MODEL", path.stem)
+                self.app.save_preference("LLAMACPP_BASE_URL", self.app.settings.llamacpp_base_url)
             await self.app.switch_active_provider(name)
             self.refresh_active_provider()
             self.output(f"Now using {self.app.harness.provider.cfg.model} ({name})")
@@ -723,8 +788,8 @@ class SettingsModelScreen(NavigableModal):
             raise ValueError("Context windows must be at least 1,024 tokens")
         self.app.settings.humoid_gemma_context_limit = gemma
         self.app.settings.humoid_glm_context_limit = glm
-        self.app.env_store.set("HUMOID_GEMMA_CONTEXT_LIMIT", str(gemma))
-        self.app.env_store.set("HUMOID_GLM_CONTEXT_LIMIT", str(glm))
+        self.app.save_preference("HUMOID_GEMMA_CONTEXT_LIMIT", str(gemma))
+        self.app.save_preference("HUMOID_GLM_CONTEXT_LIMIT", str(glm))
         active = self.app.settings.context_limit()
         self.app.telemetry.context_limit = active
         self.app.harness.context_accordion.context_limit = active
@@ -753,10 +818,30 @@ class SettingsModelScreen(NavigableModal):
                 name="provider-switch",
                 exclusive=True,
             )
+        elif action == "start-gemma":
+            self.app.settings.llamacpp_model = path.stem
+            self.app.save_preference("LLAMACPP_MODEL", path.stem)
+            self.app.settings.humoid_gemma_autostart = True
+            self.app.save_preference("HUMOID_GEMMA_AUTOSTART", "true")
+            self.refresh_gemma_autostart()
+            self.provider_worker = self.run_worker(
+                self.start_and_activate_gemma(),
+                name="start-gemma",
+                exclusive=True,
+            )
+        elif action in {"gemma-autostart-on", "gemma-autostart-off"}:
+            enabled = action == "gemma-autostart-on"
+            self.app.settings.humoid_gemma_autostart = enabled
+            self.app.save_preference("HUMOID_GEMMA_AUTOSTART", str(enabled).lower())
+            self.refresh_gemma_autostart()
+            self.output(
+                f"Local Gemma auto-start {'enabled' if enabled else 'disabled'} "
+                "and saved to .env"
+            )
         elif action in {"shell-enable", "shell-disable"}:
             enabled = action == "shell-enable"
             self.app.settings.humoid_allow_shell = enabled
-            self.app.env_store.set("HUMOID_ALLOW_SHELL", str(enabled).lower())
+            self.app.save_preference("HUMOID_ALLOW_SHELL", str(enabled).lower())
             self.refresh_shell_status()
             self.output(
                 f"Shell execution {'enabled' if enabled else 'disabled'} immediately "
@@ -782,8 +867,8 @@ class SettingsModelScreen(NavigableModal):
         elif action == "save-setting":
             key = self.query_one("#setting-key", Input).value
             value = self.query_one("#setting-value", Input).value
-            self.app.env_store.set(key, value)
-            self.output(f"Saved {key.upper()} to .env; restart or switch provider to apply it.")
+            self.app.save_preference(key, value)
+            self.output(f"Saved {key.upper()} to preferences.sqlite3 and .env.")
         elif action == "download":
             repo = self.query_one("#model-repo", Input).value.strip()
             self.download_worker = self.run_worker(
@@ -794,11 +879,16 @@ class SettingsModelScreen(NavigableModal):
         elif action == "inspect":
             self.output(await manager.inspect(path))
         elif action == "launch":
-            self.output(await manager.launch(
-                path, context=self.app.settings.humoid_gemma_context_limit,
-            ))
-            self.app.env_store.set("LLAMACPP_MODEL", path.stem)
-            self.app.env_store.set("LLAMACPP_BASE_URL", "http://127.0.0.1:8080/v1")
+            try:
+                result = await manager.launch(
+                    path, context=self.app.settings.humoid_gemma_context_limit,
+                )
+                self.output(result)
+                self.app.save_preference("LLAMACPP_MODEL", path.stem)
+                self.app.save_preference("LLAMACPP_BASE_URL", "http://127.0.0.1:8080/v1")
+                await self.detect()
+            except Exception as exc:  # noqa: BLE001 - keep model failures inside the modal
+                self.output(f"Could not launch local server: {type(exc).__name__}: {exc}")
         elif action == "stop":
             self.output(await manager.stop())
         elif action == "benchmark":
@@ -807,3 +897,12 @@ class SettingsModelScreen(NavigableModal):
                 name="model-benchmark",
                 exclusive=True,
             )
+
+    async def start_and_activate_gemma(self) -> None:
+        try:
+            self.output("Starting server and activating local Gemma…")
+            self.output(await self.app.ensure_local_gemma())
+            self.refresh_active_provider()
+            await self.detect()
+        except Exception as exc:  # noqa: BLE001 - surface startup errors in the modal
+            self.output(f"Could not start local Gemma: {type(exc).__name__}: {exc}")

@@ -5,12 +5,67 @@ import json
 import math
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from .config import Settings
 from .models import MemoryHit, utcnow
+
+
+_FILE_PATTERN = re.compile(
+    r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\.(?:py|js|ts|tsx|jsx|dart|go|rs|java|kt|"
+    r"c|cc|cpp|h|hpp|cs|rb|php|swift|scala|sh|sql|html|css|scss|json|ya?ml|toml|md)\b",
+    re.IGNORECASE,
+)
+
+
+def _file_references(text: str) -> set[str]:
+    return {match.group(0) for match in _FILE_PATTERN.finditer(text)}
+
+
+def _rank_memory(query: str, hit: MemoryHit) -> float:
+    """Provider-independent ranking tuned for coding and durable facts."""
+    query_lower = query.lower()
+    text_lower = hit.text.lower()
+    score = float(hit.score) + (3.0 * _lexical_score(query, hit.text))
+
+    query_files = _file_references(query)
+    text_files = _file_references(hit.text)
+    score += 2.5 * len(query_files & text_files)
+
+    query_symbols = {
+        token for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query)
+        if "_" in token or any(character.isupper() for character in token[1:])
+    }
+    score += 0.8 * sum(symbol.lower() in text_lower for symbol in query_symbols)
+
+    if hit.validation_status == "verified":
+        score += 0.4
+    elif hit.validation_status == "observed":
+        score += 0.2
+    elif hit.validation_status in {"invalid", "rejected"}:
+        score -= 0.8
+
+    failure = any(marker in text_lower for marker in (
+        "provider stream failed", "validation errors", "internal_server_error"
+    ))
+    debugging = any(word in query_lower for word in ("error", "fail", "debug", "traceback"))
+    if failure and not debugging:
+        score -= 2.0
+
+    if any(marker in text_lower for marker in ("tests pass", "fixed", "created", "wrote ")):
+        score += 0.15
+
+    try:
+        created = datetime.fromisoformat(hit.created_at.replace("Z", "+00:00"))
+        age_days = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 86400)
+        score += 0.25 / (1.0 + age_days / 30.0)
+    except (TypeError, ValueError):
+        pass
+
+    return score
 
 
 def _tokens(text: str) -> set[str]:
@@ -249,7 +304,7 @@ class SQLiteMemory:
             )
 
         hits.sort(
-            key=lambda hit: hit.score,
+            key=lambda hit: _rank_memory(query, hit),
             reverse=True,
         )
 
@@ -642,7 +697,9 @@ class WeaviateMemory:
             query_properties=[
                 "text"
             ],
-            limit=limit,
+            # Retrieve broadly, then apply the same coding-aware ranker used
+            # by SQLite. This keeps provider switches behaviorally stable.
+            limit=max(limit * 4, 24),
             return_metadata=MetadataQuery(
                 score=True
             ),
@@ -712,7 +769,8 @@ class WeaviateMemory:
                 )
             )
 
-        return hits
+        hits.sort(key=lambda hit: _rank_memory(query, hit), reverse=True)
+        return hits[:limit]
 
     async def temporal_neighbors(
         self,
@@ -933,14 +991,23 @@ class MemoryRouter:
                 await embedded.initialize()
 
             except Exception as exc:
-                self.status = (
+                embedded_error = (
                     "embedded-weaviate failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
-
-                raise RuntimeError(
-                    self.status
-                ) from exc
+                # Memory must never prevent the agent from starting. Keep the
+                # durable SQLite store as a provider-independent fallback while
+                # retaining the Weaviate data for the next healthy boot.
+                sqlite = SQLiteMemory(
+                    self.s.humoid_memory_db
+                )
+                await sqlite.initialize()
+                self.backend = sqlite
+                self.status = (
+                    "sqlite: healthy fallback; "
+                    f"{embedded_error}"
+                )
+                return
 
             self.backend = embedded
 
@@ -1181,20 +1248,32 @@ class MemoryRouter:
             if len(selected) >= limit:
                 break
 
-        return "\n\n".join(
+        files = sorted({
+            path
+            for hit in selected
+            for path in _file_references(hit.text)
+        })
+        sections = [
+            "[RETRIEVED WORKING SET: use verified facts and successful evidence; "
+            "ignore stale failures unless debugging them]",
+            "ACTIVE FILE REFERENCES: " + (", ".join(files[:40]) or "none"),
+        ]
+        sections.extend(
             (
                 f"[memory {index}] "
                 f"tier={hit.memory_tier} "
                 f"channel={hit.channel} "
                 f"status="
                 f"{hit.validation_status}\n"
-                f"{hit.text}"
+                f"{hit.text[:2400]}"
             )
             for index, hit in enumerate(
                 selected,
                 start=1,
             )
         )
+        packet = "\n\n".join(sections)
+        return packet[:self.s.humoid_memory_packet_max_chars]
 
     async def close(self) -> None:
         if self.backend is None:

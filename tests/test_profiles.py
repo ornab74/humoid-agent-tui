@@ -27,3 +27,12 @@ def test_model_specific_context_windows_are_independent():
     )
     assert settings.context_limit("llamacpp") == 10000
     assert settings.context_limit("digitalocean") == 20000
+
+
+def test_gemma_autostart_is_read_from_env_file(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("HUMOID_GEMMA_AUTOSTART=true\n")
+
+    settings = Settings(_env_file=env)
+
+    assert settings.humoid_gemma_autostart is True

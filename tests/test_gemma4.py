@@ -1,6 +1,11 @@
+from humoid_tui.agent import AgentHarness
+from humoid_tui.config import Settings
 from humoid_tui.gemma4 import (
-    Gemma4RuntimePolicy, render_tool_call, render_tool_response,
-    strip_thought_channels, gemma_system_suffix,
+    Gemma4RuntimePolicy,
+    gemma_system_suffix,
+    render_tool_call,
+    render_tool_response,
+    strip_thought_channels,
 )
 from humoid_tui.tool_protocols import Gemma4Protocol
 
@@ -29,3 +34,50 @@ def test_declarations_include_native_tokens():
     suffix = gemma_system_suffix([{"type":"function","function":{"name":"x","description":"d","parameters":{"type":"object","properties":{}}}}], "low")
     assert "<|tool>declaration:x" in suffix
     assert "<|think|>" in suffix
+
+
+async def _ignore_event(_event):
+    pass
+
+
+def test_request_messages_normalize_null_assistant_content(tmp_path):
+    harness = AgentHarness(
+        Settings(
+            humoid_provider="llamacpp",
+            humoid_workspace=tmp_path,
+            llamacpp_model="gemma-4-test",
+        ),
+        _ignore_event,
+    )
+    harness.messages.append({"role": "assistant", "content": None})
+
+    outgoing = harness._request_messages()
+
+    assert outgoing[-1] == {"role": "assistant", "content": ""}
+    # Request normalization must not mutate persisted session history.
+    assert harness.messages[-1]["content"] is None
+
+
+def test_request_messages_normalize_llamacpp_tool_arguments(tmp_path):
+    harness = AgentHarness(
+        Settings(
+            humoid_provider="llamacpp",
+            humoid_workspace=tmp_path,
+            llamacpp_model="gemma-4-test",
+        ),
+        _ignore_event,
+    )
+    harness.messages.append({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "list_files", "arguments": "{}"},
+        }],
+    })
+
+    outgoing = harness._request_messages()
+
+    assert outgoing[-1]["tool_calls"][0]["function"]["arguments"] == {}
+    assert harness.messages[-1]["tool_calls"][0]["function"]["arguments"] == "{}"

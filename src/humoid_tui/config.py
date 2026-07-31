@@ -182,6 +182,9 @@ class Settings(BaseSettings):
 
     humoid_gemma4_native_fallback: bool = True
     humoid_gemma4_strip_completed_thoughts: bool = True
+    # Start the managed llama.cpp server and select the local Gemma provider
+    # during app startup and before prompts when necessary.
+    humoid_gemma_autostart: bool = False
 
     # ------------------------------------------------------------------
     # Memory routing
@@ -202,6 +205,7 @@ class Settings(BaseSettings):
     humoid_memory_search_limit: int = 8
     humoid_memory_context_limit: int = 6
     humoid_memory_temporal_radius: int = 3
+    humoid_memory_packet_max_chars: int = 12000
 
     # ------------------------------------------------------------------
     # Remote Weaviate settings

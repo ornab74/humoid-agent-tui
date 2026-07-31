@@ -174,6 +174,44 @@ class AgentHarness:
             for message in folded_messages
         ]
 
+        # llama.cpp's OpenAI-compatible request model requires assistant
+        # content to be a string.  Tool-only or otherwise empty model turns
+        # may be represented as None by other providers, so normalize both
+        # current and previously persisted session history at the transport
+        # boundary.
+        for message in messages:
+            if (
+                message.get("role") == "assistant"
+                and message.get("content") is None
+            ):
+                message["content"] = ""
+
+            # llama.cpp's bundled Gemma chat template expects historical
+            # function arguments as mappings, even though the OpenAI wire
+            # format normally represents them as JSON strings.  Convert only
+            # the outgoing copy so persisted canonical tool calls remain
+            # portable to other providers.
+            if (
+                self.provider.cfg.name == "llamacpp"
+                and message.get("role") == "assistant"
+                and isinstance(message.get("tool_calls"), list)
+            ):
+                normalized_calls = []
+                for tool_call in message["tool_calls"]:
+                    normalized_call = dict(tool_call)
+                    function = dict(normalized_call.get("function") or {})
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            decoded = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            decoded = None
+                        if isinstance(decoded, dict):
+                            function["arguments"] = decoded
+                    normalized_call["function"] = function
+                    normalized_calls.append(normalized_call)
+                message["tool_calls"] = normalized_calls
+
         if not self.gemma4_active():
             return messages
 
@@ -533,6 +571,7 @@ class AgentHarness:
         )
 
         final_text = ""
+        empty_response_retries = 0
 
         for round_no in range(
             self.s.humoid_max_tool_rounds
@@ -664,7 +703,7 @@ class AgentHarness:
                 self.messages.append(
                     {
                         "role": "assistant",
-                        "content": content or None,
+                        "content": content,
                     }
                 )
 
@@ -687,7 +726,9 @@ class AgentHarness:
 
             assistant_message: dict[str, Any] = {
                 "role": "assistant",
-                "content": content or None,
+                # Keep empty assistant turns valid for stricter OpenAI-
+                # compatible servers such as llama.cpp.
+                "content": content,
             }
 
             if calls:
@@ -704,6 +745,48 @@ class AgentHarness:
                 final_text = self._clean_final_text(
                     content
                 )
+
+                if not final_text:
+                    empty_response_retries += 1
+                    if (
+                        empty_response_retries
+                        <= self.s.humoid_tool_retry_limit
+                    ):
+                        self.messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "The previous turn was empty. Continue the "
+                                    "requested task now: either call the next "
+                                    "required tool or provide a concise final "
+                                    "answer describing the completed work."
+                                ),
+                            }
+                        )
+                        await self.emit(
+                            AgentEvent(
+                                "protocol_error",
+                                "Empty model response; requesting continuation",
+                                {"round": round_no + 1},
+                            )
+                        )
+                        continue
+
+                    final_text = (
+                        "The model returned an empty response after "
+                        f"{empty_response_retries} attempts. Check the local "
+                        "server log and retry the request."
+                    )
+                    self.messages[-1]["content"] = final_text
+                    await self.emit(
+                        AgentEvent(
+                            "agent_error",
+                            final_text,
+                            {"reason": "empty_model_response"},
+                        )
+                    )
+                    await self._emit_complete_answer(final_text)
+                    break
 
                 if final_text != content:
                     self.messages[-1]["content"] = (

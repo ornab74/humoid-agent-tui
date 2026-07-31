@@ -6,6 +6,8 @@ from humoid_tui.env_store import EnvStore
 from humoid_tui.i18n import LOCALES, translate
 from humoid_tui.local_models import HardwareProfile, LocalModelManager
 from humoid_tui.memory import EmbeddedWeaviateMemory, SQLiteMemory
+from humoid_tui.memory import MemoryRouter
+from humoid_tui.preferences import PreferenceStore
 from humoid_tui.tools import ToolError, ToolRegistry
 
 
@@ -17,6 +19,13 @@ def test_env_store_preserves_template_and_updates_values(tmp_path):
     store.set("BAR", "yes")
     assert store.values() == {"FOO": "new value", "BAR": "yes"}
     assert path.read_text().startswith("# local\n")
+
+
+def test_preference_store_persists_across_instances(tmp_path):
+    path = tmp_path / "preferences.sqlite3"
+    PreferenceStore(path).set("HUMOID_PROVIDER", "digitalocean")
+
+    assert PreferenceStore(path).values()["HUMOID_PROVIDER"] == "digitalocean"
 
 
 def test_context_accordion_retains_expandable_source():
@@ -62,6 +71,41 @@ async def test_memory_crud(tmp_path):
     assert await memory.list_memories() == []
 
 
+async def test_memory_is_provider_independent_for_gemma_and_glm(tmp_path):
+    for provider in ("llamacpp", "digitalocean"):
+        router = MemoryRouter(Settings(
+            humoid_provider=provider,
+            humoid_memory_backend="sqlite",
+            humoid_memory_db=tmp_path / f"{provider}.sqlite3",
+        ))
+        await router.initialize()
+        memory_id = await router.add(f"shared memory from {provider}")
+        hits = await router.search("shared memory")
+        assert router.status == "sqlite: healthy"
+        assert any(hit.memory_id == memory_id for hit in hits)
+        await router.close()
+
+
+async def test_embedded_memory_failure_falls_back_to_sqlite(tmp_path, monkeypatch):
+    async def fail_embedded(_self):
+        raise RuntimeError("boot unavailable")
+
+    monkeypatch.setattr(EmbeddedWeaviateMemory, "initialize", fail_embedded)
+    router = MemoryRouter(Settings(
+        humoid_memory_backend="embedded-weaviate",
+        humoid_memory_db=tmp_path / "fallback.sqlite3",
+    ))
+
+    await router.initialize()
+    memory_id = await router.add("My name is Graylan")
+    packet = await router.context_packet("What is my name?")
+
+    assert router.status.startswith("sqlite: healthy fallback")
+    assert memory_id
+    assert "Graylan" in packet
+    await router.close()
+
+
 async def test_file_preview_edit_and_undo(tmp_path):
     tools = ToolRegistry(Settings(humoid_workspace=tmp_path))
 
@@ -104,6 +148,20 @@ async def test_local_launch_uses_low_memory_server_flags(tmp_path, monkeypatch):
     assert captured[captured.index("--n_batch") + 1] == "128"
     assert captured[captured.index("--n_ubatch") + 1] == "64"
     assert captured[captured.index("--logits_all") + 1] == "false"
+
+
+async def test_local_launch_is_idempotent_when_server_is_running(tmp_path):
+    manager = LocalModelManager(tmp_path)
+
+    class Process:
+        pid = 42
+        returncode = None
+
+    manager.process = Process()
+    result = await manager.launch(tmp_path / "model.gguf")
+
+    assert "already running" in result
+    assert '"running": true' in manager.status_json()
 
 
 async def test_temporary_tool_requires_read_only_validated_steps(tmp_path):

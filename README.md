@@ -1,7 +1,11 @@
 # Humoid Agent TUI
 
 An advanced Python terminal agent harness modeled after the supplied split-pane agent screenshot.
+## Demo
 
+![Demo image](demo-images/image.png)
+<br>
+</br>
 ## Providers
 
 The same orchestration loop can switch at runtime between:

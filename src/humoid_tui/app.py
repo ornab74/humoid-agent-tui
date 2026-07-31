@@ -19,6 +19,7 @@ from .env_store import EnvStore
 from .i18n import LOCALES, translate
 from .local_models import LocalModelManager
 from .models import AgentEvent
+from .preferences import PreferenceStore
 from .screens import (
     ContextAccordionScreen,
     DiffApprovalScreen,
@@ -82,14 +83,20 @@ class HumoidApp(App):
 
     def __init__(self):
         super().__init__()
-        self.settings = Settings()
+        self.env_store = EnvStore()
+        self.preference_store = PreferenceStore()
+        saved = {
+            key.lower(): value
+            for key, value in self.preference_store.values().items()
+            if key.lower() in Settings.model_fields
+        }
+        self.settings = Settings(**saved)
         self.harness: AgentHarness | None = None
         self.session = uuid.uuid4().hex[:8]
         self.telemetry = SessionTelemetry(context_limit=self.settings.context_limit())
         self._stream_open = False
         self.harness_ready = False
         self.active_worker = None
-        self.env_store = EnvStore()
         self.model_manager = LocalModelManager()
         self.language = self.settings.humoid_language if self.settings.humoid_language in LOCALES else "en"
         self.sessions: dict[str, dict[str, object]] = {}
@@ -146,6 +153,11 @@ class HumoidApp(App):
         try:
             await self.harness.initialize()
             self.harness_ready = True
+            if (
+                self.settings.humoid_gemma_autostart
+                and self.settings.humoid_provider == "llamacpp"
+            ):
+                await self.ensure_local_gemma()
         except Exception as exc:
             await self.emit_event(AgentEvent("error", str(exc)))
         finally:
@@ -167,7 +179,7 @@ class HumoidApp(App):
             raise RuntimeError("Agent services are not initialized")
         self.settings.humoid_provider = name
         if persist:
-            self.env_store.set("HUMOID_PROVIDER", name)
+            self.save_preference("HUMOID_PROVIDER", name)
         await self.harness.switch_provider(name)
         context_limit = self.settings.context_limit(name)
         self.telemetry.context_limit = context_limit
@@ -176,6 +188,47 @@ class HumoidApp(App):
         self.harness.context_accordion.context_limit = context_limit
         self._refresh_header()
         self._refresh_metrics()
+
+    def save_preference(self, key: str, value: object) -> None:
+        """Persist a user setting to SQLite and mirror it to .env."""
+        self.preference_store.set(key, value)
+        self.env_store.set(key, value)
+
+    def _configured_gemma_path(self) -> Path:
+        """Resolve LLAMACPP_MODEL to a downloaded GGUF without guessing silently."""
+        configured = Path(self.settings.llamacpp_model).name
+        candidates = self.model_manager.models()
+        for path in candidates:
+            if configured in {path.name, path.stem}:
+                return path
+        if len(candidates) == 1:
+            return candidates[0]
+        raise RuntimeError(
+            f"Configured local model {configured!r} was not found in "
+            f"{self.model_manager.model_dir}. Select a GGUF in Settings."
+        )
+
+    async def ensure_local_gemma(self) -> str:
+        """Idempotently start the managed server and activate its provider."""
+        path = self._configured_gemma_path()
+        manager = self.model_manager
+        if not manager.process or manager.process.returncode is not None:
+            await self.emit_event(AgentEvent("provider", f"Starting local Gemma: {path.name}"))
+            await manager.launch(
+                path,
+                context=self.settings.humoid_gemma_context_limit,
+            )
+        await manager.wait_until_ready()
+        self.settings.llamacpp_model = path.stem
+        self.settings.llamacpp_base_url = "http://127.0.0.1:8080/v1"
+        self.save_preference("LLAMACPP_MODEL", path.stem)
+        self.save_preference("LLAMACPP_BASE_URL", self.settings.llamacpp_base_url)
+        if (
+            self.harness.provider.cfg.name != "llamacpp"
+            or self.harness.provider.cfg.model != path.stem
+        ):
+            await self.switch_active_provider("llamacpp")
+        return f"Local Gemma ready: {path.name}"
 
     def _refresh_header(self):
         p = self.harness.provider.cfg if self.harness else self.settings.provider()
@@ -259,8 +312,16 @@ class HumoidApp(App):
         chat = self.query_one("#chat", RichLog)
         started = time.perf_counter()
         try:
-            await self.harness.run(text)
-            chat.write("\n[green]✓ COMPLETE[/green]\n")
+            if (
+                self.settings.humoid_gemma_autostart
+                and self.settings.humoid_provider == "llamacpp"
+            ):
+                await self.ensure_local_gemma()
+            response = await self.harness.run(text)
+            if response.strip():
+                chat.write("\n[green]✓ COMPLETE[/green]\n")
+            else:
+                chat.write("\n[yellow]NO RESPONSE — the model returned an empty turn[/yellow]\n")
         except asyncio.CancelledError:
             chat.write("\n[yellow]CANCELLED — provider/tool operation stopped[/yellow]\n")
             raise
@@ -289,14 +350,14 @@ class HumoidApp(App):
             else:
                 enabled = mode == "on"
                 self.settings.humoid_allow_shell = enabled
-                self.env_store.set("HUMOID_ALLOW_SHELL", str(enabled).lower())
+                self.save_preference("HUMOID_ALLOW_SHELL", str(enabled).lower())
                 chat.write(f"[yellow]Shell execution {'enabled' if enabled else 'disabled'}; cwd is the workspace, with OS-user permissions.[/yellow]")
             return True
         if text.startswith("/set "):
             parts = text.split(maxsplit=2)
             if len(parts) < 3: chat.write("[red]Usage: /set KEY VALUE[/red]")
             else:
-                self.env_store.set(parts[1], parts[2]); chat.write(f"[green]Saved {escape(parts[1].upper())} to .env[/green]")
+                self.save_preference(parts[1], parts[2]); chat.write(f"[green]Saved {escape(parts[1].upper())}[/green]")
             return True
         if text == "/undo":
             chat.write(escape(await self.harness.tools.execute("undo_file_change", {}))); return True
@@ -355,7 +416,7 @@ class HumoidApp(App):
             raise ValueError(f"Unsupported language: {code}")
         self.language = code
         self.settings.humoid_language = code
-        self.env_store.set("HUMOID_LANGUAGE", code)
+        self.save_preference("HUMOID_LANGUAGE", code)
         self._apply_language()
 
     def _apply_language(self) -> None:
