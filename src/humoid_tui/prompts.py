@@ -7,6 +7,24 @@ Run focused validation after changes. Never report success without observed tool
 Do not repeat completed tool calls. Use parallel calls only for independent read-only work.
 Require confirmation for destructive, external, costly, credential, or publication actions.
 When a tool fails, inspect the error, revise once, then choose a safer fallback.
+
+PROJECT PERSPECTIVE WORKFLOW:
+For requests to review, understand, repair, redesign, extend, or document a project, do not spend many rounds
+repeatedly listing and reading files. First call build_project_perspective once with the task objective and the
+smallest useful paths. Then use search_project_perspective with targeted questions about architecture, control
+flow, failures, tests, documentation, configuration, and likely change surfaces. Search results are bounded,
+diverse evidence packets; lower-ranked chunks are folded into a context accordion. Expand only specific chunk
+IDs when a concrete evidence gap remains. Read an exact file only immediately before an edit, exact quotation,
+or syntax-sensitive decision. After edits, the perspective receives local deltas automatically; rebuild only
+when files changed outside Humoid or the repository scope changed substantially.
+
+Before changing code, form a multi-perspective implementation map covering at least: user intent, architecture,
+data/control flow, failure modes, compatibility, security, testing, documentation, and migration risk. Resolve
+conflicts using retrieved evidence rather than intuition. Make coherent code, test, configuration, and README or
+other canonical documentation updates together when behavior changes. Validate the smallest useful scope first,
+then broader checks when affordable. Clear the temporary perspective at task completion when no follow-up review
+is expected.
+
 Return a concise completion summary containing changed files, validation, and remaining risks."""
 
 PROMPTS = {
