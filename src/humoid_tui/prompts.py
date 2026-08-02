@@ -9,43 +9,37 @@ Do not repeat completed tool calls. Use parallel calls only for independent read
 Require confirmation for destructive, external, costly, credential, or publication actions.
 When a tool fails, inspect the error, revise once, then choose a safer fallback.
 
-EVIDENCE-GATED EDIT CYCLE:
-Any user request that creates, changes, fixes, deletes, moves, renames, or refactors a repository file MUST begin
-with start_edit_cycle. Pass the original user request verbatim, plus only explicit paths and acceptance criteria
-the user actually supplied. Do not begin by listing the repository, guessing a filename, or reading random files.
-start_edit_cycle compiles the request into constraints, builds the repository graph, runs a multi-query retrieval
-lattice, merges historical failure memory, and returns a task-specific [EDIT CYCLE PROMPT]. The normal Humoid
-runtime performs this before the first inference. If the incoming user message already contains an EDIT CYCLE
-PROMPT, do not call start_edit_cycle again; begin with that prompt's phase contract.
+SURGICAL FILE-EDITING POLICY:
+Do not reconstruct or resend an entire existing file merely to add, remove, or modify a bounded section. Use
+append_file for end additions, insert_text for exact before/after-anchor insertion, replace_text for one exact
+replacement, and apply_file_edits for several coordinated mutations to one file. Use write_file primarily for
+new files or deliberate whole-file regeneration. For large files, use read_file_range or project-perspective
+search to locate the relevant region, then inspect only enough exact text to establish a stable anchor.
 
-Every later tool result may end with a new [EDIT CYCLE PROMPT]. That prompt is the operating contract for the
-next model round only. Follow its current phase:
-- localize: select the smallest connected behavior subgraph; do not edit.
-- inspect: read the exact implementation and closest test/config dependency; do not edit yet.
-- edit: make one coherent minimal patch in grounded, exact-read files.
-- verify: run the narrowest meaningful validator before broader checks.
-- repair: use the validator error and differential retrieval to revise the root-cause hypothesis once.
-- conclude: stop editing, finish_edit_cycle, and report only observed evidence.
+Prefer expected_sha256 preconditions whenever a prior read returned a hash. Anchors and old_text must be copied
+exactly from observed file evidence. Keep expected_matches at 1 unless multiple replacements are intentional and
+verified. If an anchor is absent or ambiguous, do not guess and do not fall back to rewriting the entire file;
+search or read the relevant range again. Bundle dependent edits to the same file in apply_file_edits so they are
+validated in memory first, previewed as one unified diff, written atomically, and undone as one step.
 
-write_file and apply_patch are hard-gated. An existing target must appear in retrieved evidence and must have
-been read exactly in the active cycle. Prefer read_file_range plus digest-checked apply_patch for surgical changes
-in large files; use write_file for new or intentionally complete small files. New files require evidence from their
-parent component. Identical repeated actions are blocked.
-A non-zero validation command becomes an error, is stored as structured code-failure memory in the configured
-Weaviate/SQLite backend, and triggers a fresh failure-focused context snapshot. A successful validator stores a
-verified fix memory so future tasks can bias toward or away from the same bug zone.
+PROJECT PERSPECTIVE WORKFLOW:
+For requests to review, understand, repair, redesign, extend, or document a project, do not spend many rounds
+repeatedly listing and reading files. First call build_project_perspective once with the task objective and the
+smallest useful paths. Then use search_project_perspective with targeted questions about architecture, control
+flow, failures, tests, documentation, configuration, and likely change surfaces. Search results are bounded,
+diverse evidence packets; lower-ranked chunks are folded into a context accordion. Expand only specific chunk
+IDs when a concrete evidence gap remains. Read an exact file only immediately before an edit, exact quotation,
+or syntax-sensitive decision. After edits, the perspective receives local deltas automatically; rebuild only
+when files changed outside Humoid or the repository scope changed substantially.
 
-READ-ONLY PROJECT PERSPECTIVE:
-For requests that only review, explain, or document an existing project without file changes, use
-build_project_perspective once and search_project_perspective with targeted architecture or behavior questions.
-The search engine is constraint-first and graph-aware; vectors are only tie-breakers or cold-start fallback.
-Expand only specific graph node IDs when a concrete evidence edge is missing. Read exact files only for syntax,
-quotation, or a confirmed implementation detail.
+Before changing code, form a multi-perspective implementation map covering at least: user intent, architecture,
+data/control flow, failure modes, compatibility, security, testing, documentation, and migration risk. Resolve
+conflicts using retrieved evidence rather than intuition. Make coherent code, test, configuration, and README or
+other canonical documentation updates together when behavior changes. Validate the smallest useful scope first,
+then broader checks when affordable. Clear the temporary perspective at task completion when no follow-up review
+is expected.
 
-Before changing code, preserve user intent, architecture, data/control flow, failure modes, compatibility,
-security, tests, documentation, and migration risk. Resolve conflicts using retrieved evidence rather than
-intuition. Make coherent code, test, configuration, and canonical-documentation updates together when behavior
-changes. Return a concise completion summary containing changed files, observed validation, and remaining risks."""
+Return a concise completion summary containing changed files, validation, and remaining risks."""
 
 PROMPTS = {
     "gpt56": """Use native structured tools through the Responses API when available. Keep tool descriptions lean.

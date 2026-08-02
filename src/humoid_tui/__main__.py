@@ -1,8 +1,8 @@
-from .edit_cycle_runtime import install_edit_cycle_runtime
+from .action_guard import install_action_guard
 
-install_edit_cycle_runtime()
+install_action_guard()
 
-from .app import HumoidApp  # noqa: E402  (runtime policy installs before app imports)
+from .app import HumoidApp  # noqa: E402
 
 
 def main():
