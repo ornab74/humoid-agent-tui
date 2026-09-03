@@ -24,11 +24,39 @@ Use `/provider meta`, `/provider digitalocean`, `/provider openai`, `/provider l
 
 1. Liveness/readiness
 2. Collection schema
-3. Full sentinel insert → fetch → BM25 query → delete round trip
+3. Full sentinel insert → fetch → chromatic hybrid lexical/vector query → delete round trip
+
+Rhomgaic runs beside the provider as a rebuildable coding-memory acceleration surface. It stores a
+compact 16-byte chromatic address, deterministic dense vector, exact file/symbol/action/language/token
+postings, Python AST structure, and a bounded relationship graph. Weaviate and Rhomgaic results are fused
+with reciprocal-rank fusion; neither surface is allowed to treat a chromatic bucket as truth.
+
+Phase 4 adds temporal/importance decay, cross-file `definition ↔ call` and `module ↔ import` dependency
+edges, deterministic semantic capsules distilled from repeated episodic histories, and a bounded adaptive
+retrieval policy. The adaptive policy uses only observable recall entropy/novelty, changes breadth or graph
+depth by at most one step, and never learns from forced deep recalls. `distill_memory_surface` rebuilds
+semantic capsules without changing or deleting durable Weaviate/SQLite memories.
+
+Phase 5 specializes the stack for development and maintenance. Validated edit cycles can persist compact
+provider-backed **procedural coding trajectories** while Rhomgaic aggregates them into reusable playbooks.
+Procedures are kept separate from factual RAG and are never treated as patches to replay. Every successful
+file mutation can also emit a **semantic change fingerprint** (definitions/signatures/imports/calls/exceptions/
+control-flow deltas), and the edit-cycle verification contract automatically becomes stricter when a public
+or dependency-sensitive surface changed. `plan_maintenance_change`, `maintenance_health_report`, and
+`recall_coding_playbook` expose these surfaces directly. See
+[`docs/rhomgaic-v5-coding-maintenance.md`](docs/rhomgaic-v5-coding-maintenance.md).
+
+Chromatic v6 adds multi-resolution code topology, behavioral surfaces, candidate-collapse diagnostics, and change-delta addresses. See [`docs/chromatic-v6.md`](docs/chromatic-v6.md).
+
+Agentic RAG grows the context window in layers: `reflex` → `working` → `subsurface`. The initial agent
+turn can receive only the tiny reflex surface; `recall_memory_context` opens a larger historical surface
+when the model can name an evidence gap. `memory_surface_status` exposes bucket/posting/graph/capsule and
+policy counts plus the most recent recall trace. Current repository evidence remains separate in Project
+Perspective. See [`docs/rhomgaic-memory.md`](docs/rhomgaic-memory.md) for the complete design.
 
 The memory packet includes typed `MemoryHit` fields (`memory_tier`, `channel`, `task_id`,
-`validation_status`), temporal neighbors, and an MMR-like diversity pass. This directly prevents
-the missing-`memory_tier` class mismatch seen in earlier Humoid-style pipelines.
+`validation_status`), temporal neighbors at deeper recall levels, graph-path evidence, deterministic
+context subsurfaces, and a bounded context accordion.
 
 ## Install
 

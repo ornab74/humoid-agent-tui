@@ -54,6 +54,7 @@ class AgentHarness:
 
         self.memory = MemoryRouter(settings)
         self.tools = ToolRegistry(settings)
+        self.tools.attach_memory(self.memory)
 
         self.provider_name: ProviderName = (
             settings.humoid_provider
@@ -251,6 +252,9 @@ class AgentHarness:
         """
 
         await self.memory.initialize()
+        # Project perspective and agentic memory tools share this initialized
+        # router instead of opening a second Weaviate/SQLite connection stack.
+        self.tools.perspective._memory_initialized = True
 
         await self.emit(
             AgentEvent(
@@ -536,9 +540,13 @@ class AgentHarness:
         context = ""
 
         try:
+            initial_depth = (
+                "reflex" if self.s.humoid_rag_agentic_growth else "auto"
+            )
             context = await self.memory.context_packet(
                 prompt,
                 limit=self.s.humoid_memory_context_limit,
+                depth=initial_depth,
             )
         except Exception as exc:
             await self.emit(
@@ -551,6 +559,15 @@ class AgentHarness:
                     {
                         "phase": "search",
                     },
+                )
+            )
+
+        if self.memory.last_trace:
+            await self.emit(
+                AgentEvent(
+                    "memory_recall",
+                    "progressive memory surface prepared",
+                    dict(self.memory.last_trace),
                 )
             )
 

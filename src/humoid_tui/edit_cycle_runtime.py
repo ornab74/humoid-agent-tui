@@ -175,6 +175,7 @@ def _safe_status(cycle: Any) -> str:
         "exact_reads": sorted(state.exact_reads),
         "changed_paths": state.changed_paths,
         "validators": getattr(state, "validators", getattr(state, "validation_commands", [])),
+        "change_fingerprints": getattr(state, "change_fingerprints", {}),
         "validated": state.validated,
         "failures": getattr(state, "failures", getattr(state, "failure_count", 0)),
         "latest_error": state.latest_error,

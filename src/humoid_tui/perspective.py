@@ -539,12 +539,26 @@ class ProjectPerspectiveIndex:
             "Ranking is constraint-first; vectors are tie-breakers or cold-start fallback."
         ]
         used = len(parts[0])
+        # Reserve a small tail for the context accordion so a dense graph can
+        # never consume the entire packet before folded evidence is surfaced.
+        accordion_reserve = min(420, max(160, budget // 4))
         if edges:
-            block = "\n\n[BEHAVIOR GRAPH EDGES]\n" + "\n".join(
-                f"- {self.chunks[edge.source].citation} --{edge.kind}:{edge.label}--> {self.chunks[edge.target].citation} weight={edge.weight:.2f}"
-                for edge in sorted(edges, key=lambda item: item.weight, reverse=True)[:30]
-            )
-            parts.append(block); used += len(block)
+            edge_lines = []
+            edge_header = "\n\n[BEHAVIOR GRAPH EDGES]\n"
+            edge_budget = max(0, budget - used - accordion_reserve - len(edge_header))
+            edge_used = 0
+            for edge in sorted(edges, key=lambda item: item.weight, reverse=True)[:30]:
+                line = (
+                    f"- {self.chunks[edge.source].citation} --{edge.kind}:{edge.label}--> "
+                    f"{self.chunks[edge.target].citation} weight={edge.weight:.2f}"
+                )
+                if edge_used + len(line) + 1 > edge_budget:
+                    break
+                edge_lines.append(line)
+                edge_used += len(line) + 1
+            if edge_lines:
+                block = edge_header + "\n".join(edge_lines)
+                parts.append(block); used += len(block)
         if bias.evidence:
             block = "\n\n[FAILURE MEMORY: historical bug-zone evidence]\n" + "\n".join(f"- {item}" for item in bias.evidence)
             if used + len(block) <= budget:
@@ -564,10 +578,18 @@ class ProjectPerspectiveIndex:
             else:
                 folded.append(hit)
         if folded:
-            parts.append("\n\n[CONTEXT ACCORDION: lower-value nodes folded]\n" + "\n".join(
-                f"- {hit.chunk.path}: ids={hit.chunk.chunk_id}; symbols={','.join(hit.chunk.symbols) or 'none'}"
-                for hit in folded
-            ))
+            header = "\n\n[CONTEXT ACCORDION: lower-value nodes folded]\n"
+            lines = []
+            remaining = max(0, budget - sum(len(part) for part in parts) - len(header))
+            used_folded = 0
+            for hit in folded:
+                line = f"- {hit.chunk.path}: ids={hit.chunk.chunk_id}; symbols={','.join(hit.chunk.symbols) or 'none'}"
+                if used_folded + len(line) + 1 > remaining:
+                    break
+                lines.append(line)
+                used_folded += len(line) + 1
+            if lines:
+                parts.append(header + "\n".join(lines))
         return "".join(parts)[:budget]
 
     def search_sync(self, query: str, limit: int | None, max_chars: int | None, bias: FailureBias) -> str:

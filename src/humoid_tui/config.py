@@ -207,6 +207,29 @@ class Settings(BaseSettings):
     humoid_memory_temporal_radius: int = 3
     humoid_memory_packet_max_chars: int = 12000
 
+    # Rhomgaic + chromatic code-memory sidecar
+    humoid_rhomgaic_enabled: bool = True
+    humoid_rhomgaic_db: Path = Path("./.humoid/rhomgaic-memory.sqlite3")
+    humoid_rhomgaic_dimensions: int = 96
+    humoid_rhomgaic_candidate_limit: int = 768
+    humoid_rhomgaic_graph_max_edges: int = 32
+    humoid_rhomgaic_bootstrap_limit: int = 500
+    humoid_rhomgaic_importance_half_life_days: float = 180.0
+    humoid_rhomgaic_policy_adaptation: bool = True
+    humoid_rhomgaic_semantic_capsules: bool = True
+
+    # Progressive/agentic context growth. Initial turns can receive only the
+    # reflex surface; the model explicitly opens working/subsurface recall when
+    # more evidence is needed.
+    humoid_rag_progressive: bool = True
+    humoid_rag_agentic_growth: bool = True
+    humoid_rag_graph_hops: int = 2
+    humoid_rag_reflex_max_chars: int = 3500
+    humoid_rag_working_max_chars: int = 8000
+    humoid_rag_context_cache: bool = True
+    humoid_rag_context_cache_ttl_seconds: int = 900
+    humoid_rag_context_cache_max_entries: int = 128
+
     # ------------------------------------------------------------------
     # Remote Weaviate settings
     # ------------------------------------------------------------------
@@ -287,6 +310,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "humoid_memory_db",
+        "humoid_rhomgaic_db",
         "weaviate_embedded_data_path",
         "weaviate_embedded_binary_path",
         mode="after",
@@ -439,6 +463,10 @@ class Settings(BaseSettings):
         )
 
         self.humoid_memory_db.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        self.humoid_rhomgaic_db.parent.mkdir(
             parents=True,
             exist_ok=True,
         )

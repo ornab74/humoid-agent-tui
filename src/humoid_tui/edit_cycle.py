@@ -25,6 +25,7 @@ RISK_HINTS = {
     "ui": {"component", "screen", "tui", "ui", "view", "widget"},
 }
 VALIDATORS = {"pytest", "unittest", "ruff", "tox", "npm test", "pnpm test", "yarn test", "tsc", "cargo test", "go test", "mvn test", "gradle test", "dart test"}
+MUTATION_TOOLS = {"write_file", "apply_patch", "append_file", "insert_text", "replace_text", "apply_file_edits"}
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
@@ -120,6 +121,7 @@ class CycleState:
     exact_reads: set[str] = field(default_factory=set)
     changed_paths: list[str] = field(default_factory=list)
     validators: list[str] = field(default_factory=list)
+    change_fingerprints: dict[str, dict[str, Any]] = field(default_factory=dict)
     latest_error: str = ""
     failures: int = 0
     validated: bool = False
@@ -172,7 +174,7 @@ class EditCycleOrchestrator:
         if name in {"start_edit_cycle", "refresh_edit_cycle", "edit_cycle_status", "finish_edit_cycle"}:
             return None
         if not self.active:
-            if name in {"write_file", "apply_patch"}:
+            if name in MUTATION_TOOLS:
                 return "ERROR: file edits require start_edit_cycle with the original user request"
             return None
         state = self.state
@@ -182,7 +184,7 @@ class EditCycleOrchestrator:
         if state.repeats[signature] > self.repeat_limit:
             state.phase = "blocked"
             return "ERROR: repeated identical action blocked; change the hypothesis or refresh context"
-        if name in {"write_file", "apply_patch"}:
+        if name in MUTATION_TOOLS:
             path = _path(str(args.get("path", "")))
             target = self.root / path
             grounded = path in state.grounded_paths or (not target.exists() and any(str(Path(path).parent).replace("\\", "/") in item for item in state.grounded_paths))
@@ -207,10 +209,17 @@ class EditCycleOrchestrator:
         elif name in {"read_file", "read_file_range"} and ok:
             path = _path(str(args.get("path", "")))
             state.exact_reads.add(path); state.grounded_paths.add(path); state.phase = "edit"
-        elif name in {"write_file", "apply_patch"} and ok:
+        elif name in MUTATION_TOOLS and ok:
             path = _path(str(args.get("path", "")))
             if path not in state.changed_paths: state.changed_paths.append(path)
-            state.phase = "verify"; state.validated = False
+            state.validated = False
+            fingerprint = state.change_fingerprints.get(path) or {}
+            if fingerprint.get("parse_ok_after") is False:
+                state.failures += 1
+                state.latest_error = f"semantic verification failed: {path} does not parse after the edit"
+                state.phase = "repair"
+            else:
+                state.phase = "verify"
         elif name == "undo_file_change" and ok:
             state.phase = "inspect"; state.validated = False
         elif name == "run_command" and self._validator(str(args.get("command", ""))):
@@ -228,9 +237,43 @@ class EditCycleOrchestrator:
     async def finish(self, summary: str = "") -> str:
         if not self.state:
             return "No active edit cycle."
-        self.state.active = False; self.state.phase = "conclude"
+        state = self.state
+        state.active = False; state.phase = "conclude"
         self._event("finish", summary or "closed", True)
-        return f"Edit cycle {self.state.intent.task_id} closed; validated={self.state.validated}; changed={','.join(self.state.changed_paths) or 'none'}"
+        if self.memory is not None and state.changed_paths and hasattr(self.memory, "record_coding_trajectory"):
+            trajectory = {
+                "task_id": state.intent.task_id,
+                "request": state.intent.request,
+                "operation": state.intent.operation,
+                "files": list(state.intent.files),
+                "symbols": list(state.intent.symbols),
+                "constraints": list(state.intent.constraints),
+                "acceptance": list(state.intent.acceptance),
+                "risks": list(state.intent.risks),
+                "changed_paths": list(state.changed_paths),
+                "validators": list(dict.fromkeys(state.validators)),
+                "validated": state.validated,
+                "failures": state.failures,
+                "latest_error": _clip(state.latest_error, 1800),
+                "summary": summary or "closed",
+                "context_digest": state.context_digest,
+                "change_fingerprints": dict(state.change_fingerprints),
+                "steps": [
+                    {
+                        "sequence": event.sequence,
+                        "kind": event.kind,
+                        "ok": event.ok,
+                        "digest": event.digest,
+                    }
+                    for event in state.ledger[-48:]
+                ],
+            }
+            try:
+                await self.memory.record_coding_trajectory(trajectory)
+            except Exception:
+                # Procedure learning must never block closing a successful edit cycle.
+                pass
+        return f"Edit cycle {state.intent.task_id} closed; validated={state.validated}; changed={','.join(state.changed_paths) or 'none'}"
 
     def status_json(self) -> str:
         if not self.state:
@@ -242,6 +285,7 @@ class EditCycleOrchestrator:
             "task_id": state.intent.task_id, "operation": state.intent.operation,
             "grounded_paths": sorted(state.grounded_paths), "exact_reads": sorted(state.exact_reads),
             "changed_paths": state.changed_paths, "validators": state.validators,
+            "change_fingerprints": state.change_fingerprints,
             "validated": state.validated, "failures": state.failures, "latest_error": state.latest_error,
             "ledger": [event.__dict__ for event in state.ledger[-20:]],
         }, indent=2)
@@ -251,11 +295,26 @@ class EditCycleOrchestrator:
             return "[EDIT CYCLE PROMPT]\nNo active cycle."
         state = self.state
         cycle_id = _digest(f"{state.intent.task_id}:{state.cycle}:{state.phase}:{state.revision}:{state.ledger[-1].digest if state.ledger else ''}", 18)
+        semantic_risk = max(
+            (float(value.get("risk_score", 0.0) or 0.0) for value in state.change_fingerprints.values()),
+            default=0.0,
+        )
+        public_surface_changed = any(
+            bool(value.get("public_api_change")) for value in state.change_fingerprints.values()
+        )
+        verify_contract = (
+            "Do not speculate. Run the narrowest meaningful validator first. "
+            + (
+                "The semantic fingerprint changed a public/dependency-sensitive surface; follow the focused check with linked tests or the smallest broader suite before concluding."
+                if public_surface_changed or semantic_risk >= 3.0
+                else "Broaden only when the impact frontier or validator output justifies it."
+            )
+        )
         contracts = {
             "localize": "Do not edit. Select the minimum connected files and symbols; expand only a concrete missing edge, then read the exact target.",
             "inspect": "Do not edit yet. Read the exact implementation and closest test/config dependency; identify invariants and the smallest patch.",
             "edit": "Make one coherent minimal patch in grounded, exact-read files. Prefer digest-checked apply_patch for large existing files.",
-            "verify": "Do not speculate. Run the narrowest meaningful validator first; broaden only when affordable.",
+            "verify": verify_contract,
             "repair": "Revise the root-cause hypothesis from the validator error and differential context; make one focused repair before re-testing.",
             "conclude": "Stop editing. Close the cycle and report changed files, observed validation, and unresolved risks.",
             "blocked": "Stop repeating the action. Inspect status or refresh with a narrower query.",
@@ -286,6 +345,9 @@ grounded={','.join(sorted(state.grounded_paths)) or 'none'}
 exact_reads={','.join(sorted(state.exact_reads)) or 'none'}
 changed={','.join(state.changed_paths) or 'none'}
 validators={','.join(state.validators) or 'none'}
+semantic_risk={semantic_risk:.2f}
+public_surface_changed={public_surface_changed}
+semantic_changes={json.dumps({path: {key: value for key, value in fingerprint.items() if key in {'risk_score','public_api_change','line_delta','fingerprint','risk_reasons','signature_changes','added_imports','removed_imports','chromatic_delta'}} for path, fingerprint in state.change_fingerprints.items()}, ensure_ascii=False)}
 validated={state.validated}
 latest_error={state.latest_error or 'none'}
 
@@ -356,7 +418,7 @@ RULES
             return
         state = self.state
         try:
-            await self.memory.add(
+            memory_id = await self.memory.add(
                 f"CODE {'FIX VERIFIED' if success else 'FAILURE MEMORY'}\nrequest={state.intent.request}\ncommand={command}\nfiles={','.join(state.changed_paths)}\nresult={_clip(output, 4000)}",
                 memory_tier="semantic" if success else "episodic",
                 channel="code_validation" if success else "code_failure",
@@ -364,5 +426,18 @@ RULES
                 validation_status="verified" if success else "observed",
                 metadata={"files": state.changed_paths, "command": command, "context_digest": state.context_digest},
             )
+            if success and hasattr(self.memory, "attach_code_surface"):
+                for relative in state.changed_paths[:12]:
+                    path = self.root / relative
+                    if path.suffix.lower() not in {".py", ".pyi"} or not path.is_file():
+                        continue
+                    try:
+                        content = path.read_text(encoding="utf-8", errors="replace")
+                        if len(content) <= 2_000_000:
+                            await self.memory.attach_code_surface(memory_id, relative, content)
+                    except Exception:
+                        # Structural sidecar indexing is an optimization only;
+                        # a successful code-validation memory must still persist.
+                        pass
         except Exception:
             pass
