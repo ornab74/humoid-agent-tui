@@ -384,6 +384,8 @@ class ToolRegistry:
             "recall_memory_context", "memory_surface_status",
             "recall_coding_playbook", "plan_maintenance_change", "maintenance_health_report",
             "inspect_chromatic_code_surface", "recall_chromatic_change_history",
+            "compile_chromatic_invariants", "inspect_chromatic_invariant_proof",
+            "recall_chromatic_invariant_history",
         }
         if any(step.get("tool") not in readonly for step in steps):
             raise ToolError("Temporary tools may compose only read-only tools")

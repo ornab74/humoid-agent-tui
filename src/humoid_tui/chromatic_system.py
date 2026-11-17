@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+CHROMATIC_SYSTEM_VERSION = 8
+
 _MAINTENANCE_HINTS: dict[str, tuple[str, ...]] = {
     "api": ("api", "signature", "compatibility", "public", "interface", "contract"),
     "dependency": ("dependency", "dependencies", "import", "imports", "caller", "callers", "fanout"),
@@ -270,3 +272,82 @@ def encode_change_delta(fingerprint: dict[str, Any]) -> ChromaticChangeDelta:
         parse_ok_after=parse_ok_after,
         fingerprint=stable_fp,
     )
+
+@dataclass(frozen=True, slots=True)
+class ChromaticInvariantAddress:
+    """Compact 16-byte coordinate for a coding proof obligation.
+
+    This is a retrieval/grouping hint only.  Invariant evaluation must use the
+    concrete repository and validation evidence rather than address proximity.
+    """
+
+    address: bytes
+
+    def __post_init__(self) -> None:
+        if len(self.address) != 16:
+            raise ValueError("chromatic invariant address must contain exactly 16 bytes")
+
+    def distance(self, other: "ChromaticInvariantAddress | bytes") -> float:
+        address = other.address if isinstance(other, ChromaticInvariantAddress) else bytes(other)
+        if len(address) != 16:
+            return 1.0
+        # Kind/severity/validation/source dominate; target and statement hashes
+        # permit transfer of the same obligation shape across neighboring code.
+        weights = (1.8, 1.6, 1.0, 1.5, 0.7, 0.8, 0.8, 0.6, 0.6, 0.5, 0.5, 0.45, 0.35, 0.25, 0.25, 0.25)
+        total = sum(weights)
+        return sum(
+            weight * abs(self.address[index] - address[index]) / 255.0
+            for index, weight in enumerate(weights)
+        ) / total
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"address": self.address.hex()}
+
+
+def encode_invariant_address(
+    *,
+    kind: str,
+    severity: str,
+    source: str,
+    path: str = "",
+    symbol: str = "",
+    statement: str = "",
+    operation: str = "edit",
+    requires_validation: bool = False,
+) -> ChromaticInvariantAddress:
+    """Encode the *shape* of a maintenance invariant without source code."""
+
+    def byte(value: str, salt: bytes) -> int:
+        return hashlib.blake2s(value.lower().encode("utf-8", "ignore"), key=salt, digest_size=1).digest()[0]
+
+    severity_byte = {
+        "low": 48,
+        "medium": 112,
+        "high": 192,
+        "critical": 255,
+    }.get(severity.lower(), 96)
+    material = " ".join(statement.lower().split())
+    tokens = re.findall(r"[a-z0-9_]{2,}", material)[:48]
+    token_digest = hashlib.blake2s("\x1f".join(tokens).encode("utf-8", "ignore"), digest_size=5).digest()
+    normalized_path = _norm_path(path)
+    path_parts = normalized_path.split("/") if normalized_path else []
+    package = "/".join(path_parts[:-1])
+    channels = bytes([
+        byte(kind, b"ikind"),
+        severity_byte,
+        byte(source, b"isrc"),
+        255 if requires_validation else 0,
+        byte(operation, b"iop"),
+        byte(package, b"ipkg") if package else 0,
+        byte(normalized_path, b"ifile") if normalized_path else 0,
+        byte(symbol, b"isym") if symbol else 0,
+        token_digest[0],
+        token_digest[1],
+        token_digest[2],
+        token_digest[3],
+        token_digest[4],
+        byte(kind + ":" + operation, b"ishape"),
+        byte(source + ":" + severity, b"ievid"),
+        byte(statement[:256], b"itext"),
+    ])
+    return ChromaticInvariantAddress(channels)

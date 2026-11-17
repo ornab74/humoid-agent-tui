@@ -46,7 +46,7 @@ or dependency-sensitive surface changed. `plan_maintenance_change`, `maintenance
 `recall_coding_playbook` expose these surfaces directly. See
 [`docs/rhomgaic-v5-coding-maintenance.md`](docs/rhomgaic-v5-coding-maintenance.md).
 
-Chromatic v6 adds multi-resolution code topology, behavioral surfaces, candidate-collapse diagnostics, and change-delta addresses. See [`docs/chromatic-v6.md`](docs/chromatic-v6.md).
+Chromatic v6 adds multi-resolution code topology, behavioral surfaces, candidate-collapse diagnostics, and change-delta addresses. Chromatic v7 adds invariant contracts and lightweight proof gates. Chromatic v8 adds pre-edit predictive maintenance surfaces, risk-shape addresses, validation budgeting, and forecast-vs-observed trajectory learning. See [`docs/chromatic-v6.md`](docs/chromatic-v6.md), [`docs/chromatic-v7.md`](docs/chromatic-v7.md), and [`docs/chromatic-v8.md`](docs/chromatic-v8.md).
 
 Agentic RAG grows the context window in layers: `reflex` → `working` → `subsurface`. The initial agent
 turn can receive only the tiny reflex surface; `recall_memory_context` opens a larger historical surface
@@ -332,3 +332,9 @@ cases, and optionally promote their specifications into Humoid runtime state.
 The implementation intentionally keeps model-native syntax at the transport boundary and
 normalizes all calls to `CanonicalToolCall` before validation, audit logging, policy checks,
 and execution.
+
+
+## Advanced chromatic engineering memory
+
+- Chromatic invariant compiler / lightweight change proofs: `docs/chromatic-v7.md`
+- Chromatic predictive maintenance / risk-shape surfaces: `docs/chromatic-v8.md`

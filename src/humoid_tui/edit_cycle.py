@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from .chromatic_invariants import ChromaticInvariantCompiler, InvariantContract
+
 FILE_RE = re.compile(r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+\.(?:py|pyi|js|mjs|cjs|ts|tsx|jsx|dart|go|rs|java|kt|kts|c|cc|cpp|h|hpp|cs|rb|php|swift|scala|sh|sql|html|css|scss|json|ya?ml|toml|md)\b", re.I)
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
 CITATION_RE = re.compile(r"(?P<path>(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]+):\d+-\d+")
@@ -122,6 +124,10 @@ class CycleState:
     changed_paths: list[str] = field(default_factory=list)
     validators: list[str] = field(default_factory=list)
     change_fingerprints: dict[str, dict[str, Any]] = field(default_factory=dict)
+    invariant_contract: dict[str, Any] = field(default_factory=dict)
+    invariant_proof: dict[str, Any] = field(default_factory=dict)
+    predictive_forecast: dict[str, Any] = field(default_factory=dict)
+    predictive_outcome: dict[str, Any] = field(default_factory=dict)
     latest_error: str = ""
     failures: int = 0
     validated: bool = False
@@ -136,6 +142,7 @@ class EditCycleOrchestrator:
     def __init__(self, settings: Any, root: Path, perspective: Any, memory: Any | None = None) -> None:
         self.settings, self.root, self.perspective = settings, root.resolve(), perspective
         self.compiler = EditIntentCompiler(self.root)
+        self.invariant_compiler = ChromaticInvariantCompiler(self.root)
         self.memory = memory
         self.state: CycleState | None = None
         self.max_queries = _env_int("HUMOID_EDIT_CYCLE_MAX_QUERIES", 5)
@@ -158,7 +165,23 @@ class EditCycleOrchestrator:
         for query in intent.queries[: self.max_queries]:
             packets.append(await self.perspective.search(query, limit=self.search_limit, max_chars=budget))
         self.state = CycleState(intent=intent)
+        try:
+            contract = self.invariant_compiler.compile(
+                intent.request,
+                operation=intent.operation,
+                files=intent.files,
+                symbols=intent.symbols,
+                constraints=intent.constraints,
+                acceptance=intent.acceptance,
+            )
+            self.state.invariant_contract = contract.to_dict()
+            packets.append(self.invariant_compiler.render_contract(contract, max_chars=7000))
+        except Exception:
+            # Invariant compilation is a safety/maintenance aid; repository
+            # grounding must remain usable if the static compiler cannot run.
+            self.state.invariant_contract = {}
         self._set_context(self._merge(packets))
+        self._refresh_invariant_proof()
         self._event("start", f"compiled {intent.operation}; queries={len(packets)}", True)
         return self.prompt("initialized")
 
@@ -214,9 +237,15 @@ class EditCycleOrchestrator:
             if path not in state.changed_paths: state.changed_paths.append(path)
             state.validated = False
             fingerprint = state.change_fingerprints.get(path) or {}
+            self._refresh_invariant_proof()
+            proof_gate = state.invariant_proof.get("gate", True) if state.invariant_proof else True
             if fingerprint.get("parse_ok_after") is False:
                 state.failures += 1
                 state.latest_error = f"semantic verification failed: {path} does not parse after the edit"
+                state.phase = "repair"
+            elif not proof_gate and state.invariant_proof.get("failed", 0):
+                state.failures += 1
+                state.latest_error = "chromatic invariant proof detected a high-severity static contract violation"
                 state.phase = "repair"
             else:
                 state.phase = "verify"
@@ -225,7 +254,14 @@ class EditCycleOrchestrator:
         elif name == "run_command" and self._validator(str(args.get("command", ""))):
             command = str(args.get("command", "")); state.validators.append(command)
             if ok:
-                state.validated = True; state.phase = "conclude"; await self._remember(True, command, output)
+                state.validated = True
+                self._refresh_invariant_proof()
+                if state.invariant_proof and not state.invariant_proof.get("gate", True):
+                    state.phase = "repair"
+                    state.latest_error = "validator passed but chromatic invariant proof still has blocking obligations"
+                else:
+                    state.phase = "conclude"
+                await self._remember(True, command, output)
             else:
                 state.failures += 1; state.latest_error = _clip(output, 6000); state.phase = "repair"
                 await self._remember(False, command, output)
@@ -238,8 +274,26 @@ class EditCycleOrchestrator:
         if not self.state:
             return "No active edit cycle."
         state = self.state
+        self._refresh_invariant_proof()
+        if state.changed_paths and state.invariant_proof and not state.invariant_proof.get("gate", True):
+            state.phase = "repair"
+            obligations = state.invariant_proof.get("obligations") or []
+            preview = "; ".join(str(value) for value in obligations[:4]) or "blocking invariant obligation"
+            self._event("finish-blocked", preview, False)
+            return f"ERROR: edit cycle cannot conclude; chromatic invariant proof is not satisfied: {preview}"
         state.active = False; state.phase = "conclude"
         self._event("finish", summary or "closed", True)
+        if state.predictive_forecast:
+            try:
+                from .chromatic_predictive import evaluate_predictive_outcome
+                state.predictive_outcome = evaluate_predictive_outcome(
+                    state.predictive_forecast,
+                    changed_paths=state.changed_paths,
+                    failures=state.failures,
+                    validated=state.validated,
+                ).to_dict()
+            except Exception:
+                state.predictive_outcome = {}
         if self.memory is not None and state.changed_paths and hasattr(self.memory, "record_coding_trajectory"):
             trajectory = {
                 "task_id": state.intent.task_id,
@@ -258,6 +312,10 @@ class EditCycleOrchestrator:
                 "summary": summary or "closed",
                 "context_digest": state.context_digest,
                 "change_fingerprints": dict(state.change_fingerprints),
+                "invariant_contract": dict(state.invariant_contract),
+                "invariant_proof": dict(state.invariant_proof),
+                "predictive_forecast": dict(state.predictive_forecast),
+                "predictive_outcome": dict(state.predictive_outcome),
                 "steps": [
                     {
                         "sequence": event.sequence,
@@ -286,6 +344,8 @@ class EditCycleOrchestrator:
             "grounded_paths": sorted(state.grounded_paths), "exact_reads": sorted(state.exact_reads),
             "changed_paths": state.changed_paths, "validators": state.validators,
             "change_fingerprints": state.change_fingerprints,
+            "invariant_contract": state.invariant_contract, "invariant_proof": state.invariant_proof,
+            "predictive_forecast": state.predictive_forecast, "predictive_outcome": state.predictive_outcome,
             "validated": state.validated, "failures": state.failures, "latest_error": state.latest_error,
             "ledger": [event.__dict__ for event in state.ledger[-20:]],
         }, indent=2)
@@ -302,12 +362,21 @@ class EditCycleOrchestrator:
         public_surface_changed = any(
             bool(value.get("public_api_change")) for value in state.change_fingerprints.values()
         )
+        proof_status = state.invariant_proof.get("status", "unavailable") if state.invariant_proof else "unavailable"
+        proof_score = float(state.invariant_proof.get("proof_score", 0.0) or 0.0) if state.invariant_proof else 0.0
+        proof_gate = bool(state.invariant_proof.get("gate", True)) if state.invariant_proof else True
+        open_obligations = list(state.invariant_proof.get("obligations") or [])[:6] if state.invariant_proof else []
+        forecast_risk = float(state.predictive_forecast.get("overall_risk", 0.0) or 0.0) if state.predictive_forecast else 0.0
+        forecast_confidence = float(state.predictive_forecast.get("confidence", 0.0) or 0.0) if state.predictive_forecast else 0.0
+        forecast_budget = state.predictive_forecast.get("validation_budget") if isinstance(state.predictive_forecast.get("validation_budget"), dict) else {}
+        forecast_tier = str(forecast_budget.get("tier") or "none")
+        forecast_hot_paths = [str(item.get("path")) for item in state.predictive_forecast.get("hot_paths", []) if isinstance(item, dict) and item.get("path")][:8]
         verify_contract = (
             "Do not speculate. Run the narrowest meaningful validator first. "
             + (
-                "The semantic fingerprint changed a public/dependency-sensitive surface; follow the focused check with linked tests or the smallest broader suite before concluding."
-                if public_surface_changed or semantic_risk >= 3.0
-                else "Broaden only when the impact frontier or validator output justifies it."
+                "The semantic fingerprint or predictive surface is high-risk; follow the focused check with linked tests or the smallest broader suite before concluding."
+                if public_surface_changed or semantic_risk >= 3.0 or forecast_tier in {"expanded", "defensive"}
+                else "Broaden only when the impact frontier, predictive budget, or validator output justifies it."
             )
         )
         contracts = {
@@ -348,6 +417,17 @@ validators={','.join(state.validators) or 'none'}
 semantic_risk={semantic_risk:.2f}
 public_surface_changed={public_surface_changed}
 semantic_changes={json.dumps({path: {key: value for key, value in fingerprint.items() if key in {'risk_score','public_api_change','line_delta','fingerprint','risk_reasons','signature_changes','added_imports','removed_imports','chromatic_delta'}} for path, fingerprint in state.change_fingerprints.items()}, ensure_ascii=False)}
+invariant_contract={state.invariant_contract.get('contract_id', 'none') if state.invariant_contract else 'none'}
+invariant_proof_status={proof_status}
+invariant_proof_score={proof_score:.4f}
+invariant_gate={proof_gate}
+invariant_obligations={json.dumps(open_obligations, ensure_ascii=False)}
+predictive_forecast_id={state.predictive_forecast.get('forecast_id', 'none') if state.predictive_forecast else 'none'}
+predictive_risk_priority={forecast_risk:.4f}
+predictive_confidence={forecast_confidence:.4f}
+predictive_validation_tier={forecast_tier}
+predictive_hot_paths={json.dumps(forecast_hot_paths, ensure_ascii=False)}
+predictive_observation={state.predictive_outcome.get('observation', 'none') if state.predictive_outcome else 'none'}
 validated={state.validated}
 latest_error={state.latest_error or 'none'}
 
@@ -364,9 +444,32 @@ RULES
 - This prompt governs only the next model round.
 - Do not invent files, symbols, tests, or validation.
 - Existing files require grounded evidence and an exact read before editing.
+- Predictive risk is an uncalibrated inspection/validation priority, never proof that code will fail.
 - A failed validator starts a new repair context; do not repeat the same patch blindly.
 - Keep calls literal and small for local models.
 [/EDIT CYCLE PROMPT]""", self.prompt_limit)
+
+    def _refresh_invariant_proof(self) -> None:
+        if not self.state or not self.state.invariant_contract:
+            return
+        try:
+            report = self.invariant_compiler.evaluate(
+                self.state.invariant_contract,
+                change_fingerprints=self.state.change_fingerprints,
+                changed_paths=self.state.changed_paths,
+                validators=self.state.validators,
+                validated=self.state.validated,
+            )
+            self.state.invariant_proof = report.to_dict()
+        except Exception:
+            # A failed auxiliary proof engine should be visible as unavailable,
+            # not misreported as a successful proof.
+            self.state.invariant_proof = {
+                "status": "unavailable",
+                "gate": True,
+                "proof_score": 0.0,
+                "obligations": ["invariant evaluator unavailable; rely on explicit repository validation"],
+            }
 
     def _set_context(self, packet: str) -> None:
         assert self.state is not None

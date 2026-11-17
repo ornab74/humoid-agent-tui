@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .models import MemoryHit
-from .chromatic_system import build_hierarchy_surface, encode_change_delta
+from .chromatic_system import (
+    CHROMATIC_SYSTEM_VERSION,
+    ChromaticInvariantAddress,
+    build_hierarchy_surface,
+    encode_change_delta,
+)
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./:-]{1,127}")
 _FILE_RE = re.compile(
@@ -822,6 +827,43 @@ class RhomgaicMemory:
                     change_deltas.append(encode_change_delta(payload).to_dict())
                 except Exception:
                     continue
+        invariant_payload = trajectory.get("invariant_contract") or {}
+        invariant_addresses: list[dict[str, Any]] = []
+        if isinstance(invariant_payload, dict):
+            for item in (invariant_payload.get("invariants") or [])[:64]:
+                if not isinstance(item, dict):
+                    continue
+                raw = str(item.get("address_hex") or item.get("address") or "")
+                try:
+                    address = bytes.fromhex(raw)
+                except ValueError:
+                    continue
+                if len(address) != 16:
+                    continue
+                invariant_addresses.append({
+                    "address": address.hex(),
+                    "kind": str(item.get("kind") or "")[:64],
+                    "severity": str(item.get("severity") or "")[:24],
+                    "requires_validation": bool(item.get("requires_validation")),
+                })
+        predictive_payload = trajectory.get("predictive_forecast") or {}
+        predictive_address = ""
+        predictive_class: list[int] = []
+        predictive_tier = ""
+        if isinstance(predictive_payload, dict):
+            predictive_address = str(predictive_payload.get("risk_address_hex") or "")[:32]
+            try:
+                predictive_bytes = bytes.fromhex(predictive_address)
+            except ValueError:
+                predictive_bytes = b""
+            if len(predictive_bytes) == 16:
+                # Exclude action/language and fingerprint-tail bytes so the
+                # reusable procedure class captures risk topology rather than
+                # a specific file or textual task.
+                predictive_class = [int(value) // 64 for value in predictive_bytes[2:14]]
+            budget = predictive_payload.get("validation_budget")
+            if isinstance(budget, dict):
+                predictive_tier = str(budget.get("tier") or "")[:24]
         validated = bool(trajectory.get("validated"))
         failures = max(0, int(trajectory.get("failures", 0) or 0))
         outcome = "verified" if validated else ("failed" if failures else "observed")
@@ -842,6 +884,16 @@ class RhomgaicMemory:
                 }
                 for item in change_deltas[:8]
             ],
+            "invariant_classes": [
+                {
+                    "kind": item.get("kind", ""),
+                    "severity": item.get("severity", ""),
+                    "validation": bool(item.get("requires_validation")),
+                }
+                for item in invariant_addresses[:16]
+            ],
+            "predictive_class": predictive_class,
+            "predictive_tier": predictive_tier,
         }
         signature = json.dumps(shape, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         procedure_id = hashlib.blake2s(signature.encode("utf-8", "ignore"), digest_size=16).hexdigest()
@@ -851,11 +903,17 @@ class RhomgaicMemory:
             f"api={int(bool(item.get('public_api_change')))}:parse={int(bool(item.get('parse_ok_after', True)))}"
             for item in change_deltas[:12]
         )
+        invariant_text = ";".join(
+            f"{item.get('kind','')}:{item.get('severity','')}@{str(item.get('address',''))[:12]}:"
+            f"validation={int(bool(item.get('requires_validation')))}"
+            for item in invariant_addresses[:20]
+        )
         text = (
             f"PROCEDURAL CODE TRAJECTORY action={operation} language={language} outcome={outcome} "
             f"request={request} files={','.join(changed_paths)} symbols={','.join(symbols)} "
             f"risks={','.join(risks)} steps={' > '.join(step_kinds)} validators={' ; '.join(validators)} "
-            f"chromatic_changes={change_text} summary={summary}"
+            f"chromatic_changes={change_text} chromatic_invariants={invariant_text} "
+            f"chromatic_risk={predictive_address} risk_tier={predictive_tier or 'none'} summary={summary}"
         )[:12000]
         encoded = ChromaticCodeEmbedding.encode(text, dimensions=self.dimensions)
         now = datetime.now(timezone.utc).isoformat()
@@ -881,6 +939,7 @@ class RhomgaicMemory:
         trajectory_payload["step_kinds"] = list(step_kinds)
         trajectory_payload["validators"] = list(validators)
         trajectory_payload["chromatic_change_deltas"] = change_deltas
+        trajectory_payload["chromatic_invariant_addresses"] = invariant_addresses
         # Raw source is never accepted here. Semantic fingerprints are compact metadata.
         trajectory_payload.pop("source", None)
         trajectory_payload.pop("content", None)
@@ -1871,6 +1930,271 @@ class RhomgaicMemory:
             )
         return "\n".join(lines)[: max(800, int(max_chars))]
 
+    async def search_invariant_procedures(
+        self, contract: dict[str, Any], *, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self._search_invariant_procedures_sync, dict(contract), limit
+        )
+
+    def _search_invariant_procedures_sync(
+        self, contract: dict[str, Any], limit: int
+    ) -> list[dict[str, Any]]:
+        current: list[tuple[ChromaticInvariantAddress, str, str]] = []
+        for item in (contract.get("invariants") or [])[:64]:
+            if not isinstance(item, dict):
+                continue
+            raw = str(item.get("address_hex") or item.get("address") or "")
+            try:
+                address = bytes.fromhex(raw)
+            except ValueError:
+                continue
+            if len(address) != 16:
+                continue
+            current.append((
+                ChromaticInvariantAddress(address),
+                str(item.get("kind") or "")[:64],
+                str(item.get("severity") or "")[:24],
+            ))
+        if not current:
+            return []
+        cap = max(1, min(12, int(limit)))
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                """
+                SELECT procedure_id,source_memory_id,action,language,files,symbols,trajectory,validators,
+                       successes,failures,support_count,confidence,last_outcome,updated_at
+                FROM rhomgaic_procedures
+                ORDER BY confidence DESC, support_count DESC, updated_at DESC
+                LIMIT 512
+                """
+            ).fetchall()
+        current_kinds = {kind for _, kind, _ in current if kind}
+        severity_weight = {"critical": 2.0, "high": 1.5, "medium": 1.0, "low": 0.75}
+        ranked: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                trajectory = json.loads(str(row[6]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                trajectory = {}
+            raw_items = trajectory.get("chromatic_invariant_addresses") if isinstance(trajectory, dict) else []
+            stored: list[tuple[ChromaticInvariantAddress, str]] = []
+            for item in raw_items if isinstance(raw_items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    address = bytes.fromhex(str(item.get("address") or ""))
+                except ValueError:
+                    continue
+                if len(address) == 16:
+                    stored.append((ChromaticInvariantAddress(address), str(item.get("kind") or "")[:64]))
+            if not stored:
+                continue
+            weighted_distance = 0.0
+            total_weight = 0.0
+            for address, _kind, severity in current:
+                weight = severity_weight.get(severity, 1.0)
+                weighted_distance += weight * min(address.distance(other) for other, _ in stored)
+                total_weight += weight
+            invariant_similarity = max(0.0, 1.0 - weighted_distance / max(1e-9, total_weight))
+            stored_kinds = {kind for _, kind in stored if kind}
+            union = current_kinds | stored_kinds
+            kind_overlap = len(current_kinds & stored_kinds) / len(union) if union else 0.0
+            successes = int(row[8] or 0)
+            failures = int(row[9] or 0)
+            support_count = max(1, int(row[10] or successes + failures or 1))
+            confidence = max(0.0, min(1.0, float(row[11] or 0.0)))
+            support_strength = min(1.0, math.log1p(support_count) / math.log(9.0))
+            score = (
+                0.55 * invariant_similarity
+                + 0.15 * kind_overlap
+                + 0.22 * confidence
+                + 0.08 * support_strength
+            )
+            ranked.append({
+                "procedure_id": str(row[0]),
+                "source_memory_id": str(row[1] or ""),
+                "score": score,
+                "invariant_similarity": invariant_similarity,
+                "kind_overlap": kind_overlap,
+                "confidence": confidence,
+                "support_count": support_count,
+                "success_rate": successes / support_count,
+                "action": str(row[2] or ""),
+                "language": str(row[3] or ""),
+                "files": [value for value in str(row[4]).split("\n") if value][:24],
+                "symbols": [value for value in str(row[5]).split("\n") if value][:32],
+                "validators": [value for value in str(row[7]).split("\n") if value][:16],
+                "outcome": str(row[12] or "unknown"),
+                "updated_at": str(row[13] or ""),
+                "matched_kinds": sorted(current_kinds & stored_kinds)[:24],
+            })
+        ranked.sort(key=lambda item: (
+            -float(item["score"]), -float(item["invariant_similarity"]),
+            -float(item["confidence"]), -int(item["support_count"]), item["procedure_id"],
+        ))
+        return ranked[:cap]
+
+    async def invariant_procedure_packet(
+        self, contract: dict[str, Any], *, limit: int = 5, max_chars: int = 8000
+    ) -> str:
+        procedures = await self.search_invariant_procedures(contract, limit=limit)
+        lines = [
+            "[CHROMATIC INVARIANT-HISTORY SURFACE: similar proof obligations are validation-strategy hints, never proof]",
+        ]
+        if not procedures:
+            lines.append("- none")
+        for item in procedures:
+            lines.append(
+                f"- id={item['procedure_id']} score={float(item['score']):.3f} "
+                f"invariant_similarity={float(item['invariant_similarity']):.3f} "
+                f"kind_overlap={float(item['kind_overlap']):.3f} confidence={float(item['confidence']):.3f} "
+                f"support={item['support_count']} success_rate={float(item['success_rate']):.3f} "
+                f"action={item['action']} lang={item['language']} kinds={','.join(item['matched_kinds']) or 'none'} "
+                f"validators={'; '.join(item['validators']) or 'none'}"
+            )
+        return "\n".join(lines)[: max(800, int(max_chars))]
+
+    async def search_predictive_procedures(
+        self, risk_address_hex: str, *, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Retrieve procedures by v8 chromatic risk-shape similarity."""
+
+        try:
+            raw = bytes.fromhex(str(risk_address_hex or ""))
+        except ValueError:
+            return []
+        if len(raw) != 16:
+            return []
+        from .chromatic_predictive import ChromaticRiskAddress
+
+        current = ChromaticRiskAddress(raw)
+        cap = max(1, min(24, int(limit)))
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                """
+                SELECT procedure_id,source_memory_id,action,language,files,symbols,trajectory,validators,
+                       successes,failures,support_count,confidence,last_outcome,updated_at
+                FROM rhomgaic_procedures
+                ORDER BY confidence DESC, support_count DESC, updated_at DESC
+                LIMIT 512
+                """
+            ).fetchall()
+        ranked: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                trajectory = json.loads(str(row[6]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            stored_forecast = trajectory.get("predictive_forecast") if isinstance(trajectory, dict) else None
+            if not isinstance(stored_forecast, dict):
+                continue
+            try:
+                stored_raw = bytes.fromhex(str(stored_forecast.get("risk_address_hex") or ""))
+            except ValueError:
+                continue
+            if len(stored_raw) != 16:
+                continue
+            similarity = max(0.0, 1.0 - current.distance(ChromaticRiskAddress(stored_raw)))
+            successes = int(row[8] or 0)
+            failures = int(row[9] or 0)
+            support_count = max(1, int(row[10] or successes + failures or 1))
+            confidence = max(0.0, min(1.0, float(row[11] or 0.0)))
+            support_strength = min(1.0, math.log1p(support_count) / math.log(9.0))
+            recency = _freshness(str(row[13] or ""), 365.0)
+            score = 0.65 * similarity + 0.18 * confidence + 0.10 * support_strength + 0.07 * recency
+            ranked.append({
+                "procedure_id": str(row[0]),
+                "source_memory_id": str(row[1] or ""),
+                "score": score,
+                "risk_similarity": similarity,
+                "confidence": confidence,
+                "support_count": support_count,
+                "success_rate": successes / support_count,
+                "action": str(row[2] or ""),
+                "language": str(row[3] or ""),
+                "files": [value for value in str(row[4]).split("\n") if value][:24],
+                "symbols": [value for value in str(row[5]).split("\n") if value][:32],
+                "validators": [value for value in str(row[7]).split("\n") if value][:16],
+                "outcome": str(row[12] or "unknown"),
+                "updated_at": str(row[13] or ""),
+                "predictive_source": "risk-address",
+            })
+        ranked.sort(key=lambda item: (
+            -float(item["score"]), -float(item["risk_similarity"]),
+            -float(item["confidence"]), -int(item["support_count"]), item["procedure_id"],
+        ))
+        return ranked[:cap]
+
+    async def predictive_maintenance_history(
+        self, query: str, contract: dict[str, Any] | None = None, *, risk_address_hex: str = "", limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """Fuse lexical/semantic and invariant-shaped procedure history for risk planning.
+
+        This returns historical outcome evidence only.  It does not mutate the
+        adaptive retrieval policy and it never treats prior failures as proof
+        that the current change will fail.
+        """
+
+        cap = max(1, min(24, int(limit)))
+        semantic = await self.search_procedures(query, limit=min(24, cap * 2))
+        invariant: list[dict[str, Any]] = []
+        if isinstance(contract, dict) and contract.get("invariants"):
+            invariant = await self.search_invariant_procedures(contract, limit=min(24, cap * 2))
+        predictive = await self.search_predictive_procedures(
+            risk_address_hex, limit=min(24, cap * 2)
+        ) if risk_address_hex else []
+
+        merged: dict[str, dict[str, Any]] = {}
+        for source_name, items in (("semantic", semantic), ("invariant", invariant), ("risk-address", predictive)):
+            for item in items:
+                payload = dict(item)
+                procedure_id = str(payload.get("procedure_id") or "")
+                if not procedure_id:
+                    continue
+                payload["predictive_source"] = source_name
+                prior = merged.get(procedure_id)
+                if prior is None:
+                    merged[procedure_id] = payload
+                    continue
+                # Keep the strongest score while preserving evidence that the
+                # same trajectory was retrieved from both independent surfaces.
+                prior["score"] = max(float(prior.get("score", 0.0) or 0.0), float(payload.get("score", 0.0) or 0.0))
+                prior["confidence"] = max(float(prior.get("confidence", 0.0) or 0.0), float(payload.get("confidence", 0.0) or 0.0))
+                prior["predictive_source"] = "semantic+invariant"
+                if payload.get("matched_kinds"):
+                    prior["matched_kinds"] = list(dict.fromkeys([*(prior.get("matched_kinds") or []), *(payload.get("matched_kinds") or [])]))[:24]
+        ranked = list(merged.values())
+        ranked.sort(key=lambda item: (
+            -float(item.get("score", 0.0) or 0.0),
+            -float(item.get("confidence", 0.0) or 0.0),
+            -int(item.get("support_count", 0) or 0),
+            str(item.get("procedure_id") or ""),
+        ))
+        return ranked[:cap]
+
+    async def predictive_maintenance_packet(
+        self, query: str, contract: dict[str, Any] | None = None, *, risk_address_hex: str = "", limit: int = 8, max_chars: int = 9000
+    ) -> str:
+        items = await self.predictive_maintenance_history(
+            query, contract, risk_address_hex=risk_address_hex, limit=limit
+        )
+        lines = [
+            "[CHROMATIC REGRESSION-HISTORY SURFACE: historical outcomes are risk signals, never predictions or proof]",
+            f"query={query}",
+        ]
+        if not items:
+            lines.append("- none")
+        for item in items:
+            lines.append(
+                f"- id={item.get('procedure_id')} score={float(item.get('score', 0)):.3f} "
+                f"confidence={float(item.get('confidence', 0)):.3f} support={item.get('support_count', 0)} "
+                f"success_rate={float(item.get('success_rate', 0.5)):.3f} source={item.get('predictive_source', 'procedural')} "
+                f"files={','.join((item.get('files') or [])[:8]) or 'none'} "
+                f"validators={'; '.join((item.get('validators') or [])[:8]) or 'none'}"
+            )
+        return "\n".join(lines)[: max(800, int(max_chars))]
+
     async def procedure_packet(self, query: str, *, limit: int = 5, max_chars: int = 8000) -> str:
         procedures = await self.search_procedures(query, limit=limit)
         lines = [
@@ -2033,6 +2357,7 @@ class RhomgaicMemory:
             ).fetchone()[0]) if memories else 0
         return {
             "schema_version": _SCHEMA_VERSION,
+            "chromatic_system_version": CHROMATIC_SYSTEM_VERSION,
             "memories": memories,
             "postings": terms,
             "graph_edges": edges,

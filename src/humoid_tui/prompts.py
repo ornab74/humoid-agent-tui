@@ -35,9 +35,13 @@ For non-trivial fixes, refactors, extensions, migrations, or maintenance work, r
 trajectories. Current code is authoritative. Historical procedures are strategy hints only; never replay an old patch or
 validator sequence blindly. Use plan_maintenance_change when blast radius or validation scope is unclear,
 recall_coding_playbook when a prior repair strategy may save rediscovery, and maintenance_health_report when choosing
-where maintenance effort should be concentrated. After a mutation, read the semantic change fingerprint: signature,
-public API, dependency, exception, or control-flow changes require proportionally broader validation. Optimize for the
-smallest coherent patch that reduces uncertainty and preserves maintainability, not merely the fewest changed lines.
+where maintenance effort should be concentrated. For changes with compatibility, API, dependency, or explicit preservation
+requirements, use compile_chromatic_invariants before editing (or rely on the invariant contract emitted by an edit cycle),
+and inspect_chromatic_invariant_proof before concluding when obligations remain. Use recall_chromatic_invariant_history when
+a similar proof/validation contract from prior verified work could reduce rediscovery. After a mutation, read the semantic change
+fingerprint: signature, public API, dependency, exception, or control-flow changes require proportionally broader validation.
+A chromatic invariant proof is lightweight static/validation evidence, not formal verification. Optimize for the smallest
+coherent patch that reduces uncertainty and preserves maintainability, not merely the fewest changed lines.
 
 PROJECT PERSPECTIVE WORKFLOW:
 For requests to review, understand, repair, redesign, extend, or document a project, do not spend many rounds

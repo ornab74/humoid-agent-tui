@@ -1290,6 +1290,56 @@ class MemoryRouter:
         except Exception:
             return "[CHROMATIC CHANGE-HISTORY SURFACE]\n- none"
 
+    async def chromatic_invariant_playbooks(
+        self, contract: dict[str, Any], *, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        if self.rhomgaic is None:
+            return []
+        try:
+            return await self.rhomgaic.search_invariant_procedures(
+                contract, limit=max(1, min(12, int(limit)))
+            )
+        except Exception:
+            return []
+
+    async def chromatic_invariant_playbook_packet(
+        self, contract: dict[str, Any], *, limit: int = 5, max_chars: int = 8000
+    ) -> str:
+        if self.rhomgaic is None:
+            return "[CHROMATIC INVARIANT-HISTORY SURFACE]\n- none"
+        try:
+            return await self.rhomgaic.invariant_procedure_packet(
+                contract, limit=max(1, min(12, int(limit))), max_chars=max_chars
+            )
+        except Exception:
+            return "[CHROMATIC INVARIANT-HISTORY SURFACE]\n- none"
+
+    async def predictive_maintenance_history(
+        self, query: str, contract: dict[str, Any] | None = None, *, risk_address_hex: str = "", limit: int = 8
+    ) -> list[dict[str, Any]]:
+        if self.rhomgaic is None:
+            return []
+        try:
+            return await self.rhomgaic.predictive_maintenance_history(
+                query, contract, risk_address_hex=risk_address_hex,
+                limit=max(1, min(24, int(limit)))
+            )
+        except Exception:
+            return []
+
+    async def predictive_maintenance_packet(
+        self, query: str, contract: dict[str, Any] | None = None, *, risk_address_hex: str = "", limit: int = 8, max_chars: int = 9000
+    ) -> str:
+        if self.rhomgaic is None:
+            return "[CHROMATIC REGRESSION-HISTORY SURFACE]\n- none"
+        try:
+            return await self.rhomgaic.predictive_maintenance_packet(
+                query, contract, risk_address_hex=risk_address_hex,
+                limit=max(1, min(24, int(limit))), max_chars=max_chars
+            )
+        except Exception:
+            return "[CHROMATIC REGRESSION-HISTORY SURFACE]\n- none"
+
     async def coding_playbooks(self, query: str, *, limit: int = 5) -> list[dict[str, Any]]:
         if self.rhomgaic is None:
             return []

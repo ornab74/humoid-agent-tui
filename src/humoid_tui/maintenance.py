@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .code_intelligence import CodeIntelligenceIndex, ImpactReport
+from .chromatic_invariants import ChromaticInvariantCompiler
+from .chromatic_predictive import ChromaticPredictiveMaintainer
 
 _TODO_RE = re.compile(r"\b(?:TODO|FIXME|HACK|XXX)\b", re.I)
 _TEST_RE = re.compile(r"(?:^|/)(?:tests?|specs?)(?:/|$)|(?:^|[_-])test(?:[_-]|\.)|(?:^|[_-])spec(?:[_-]|\.)", re.I)
@@ -476,6 +478,50 @@ class MaintenancePlanner:
             except Exception:
                 playbooks = []
         validators = validator_candidates(self.root, impact)
+        operation = "debug" if any(token in query.lower() for token in ("debug", "bug", "fix", "regression", "failure")) else "edit"
+        invariant_contract = None
+        try:
+            invariant_contract = ChromaticInvariantCompiler(self.root, self.index).compile(
+                query, operation=operation, files=impact.files[:12]
+            )
+            invariant_preview = ChromaticInvariantCompiler.render_contract(invariant_contract, max_chars=5000)
+        except Exception:
+            invariant_preview = "[CHROMATIC INVARIANT CONTRACT]\nunavailable"
+        predictive_preview = "[CHROMATIC PREDICTIVE MAINTENANCE]\nunavailable"
+        if invariant_contract is not None:
+            historical: list[dict[str, Any]] = []
+            if memory is not None and hasattr(memory, "predictive_maintenance_history"):
+                try:
+                    historical = list(await memory.predictive_maintenance_history(
+                        query, invariant_contract.to_dict(), limit=8
+                    ))
+                except Exception:
+                    historical = []
+            try:
+                predictor = ChromaticPredictiveMaintainer(self.root, self.index)
+                forecast = predictor.forecast(
+                    query,
+                    operation=operation,
+                    contract=invariant_contract,
+                    historical=historical,
+                    validators=validators,
+                )
+                if memory is not None and hasattr(memory, "predictive_maintenance_history"):
+                    try:
+                        chromatic_history = list(await memory.predictive_maintenance_history(
+                            query, invariant_contract.to_dict(),
+                            risk_address_hex=forecast.risk_address_hex, limit=10
+                        ))
+                        if chromatic_history:
+                            forecast = predictor.forecast(
+                                query, operation=operation, contract=invariant_contract,
+                                historical=chromatic_history, validators=validators,
+                            )
+                    except Exception:
+                        pass
+                predictive_preview = predictor.render(forecast, max_chars=7000)
+            except Exception:
+                predictive_preview = "[CHROMATIC PREDICTIVE MAINTENANCE]\nunavailable"
         lines = [
             "[MAINTENANCE EXECUTION CONTRACT: current code beats historical procedure]",
             f"query={query}",
@@ -492,6 +538,8 @@ class MaintenancePlanner:
                 f"- d={node.distance} {node.path}:{node.symbol} kind={node.kind} "
                 f"score={node.score:.3f} reasons={'; '.join(node.reasons)}"
             )
+        lines.extend(["", "CHROMATIC INVARIANT PREFLIGHT", invariant_preview])
+        lines.extend(["", "CHROMATIC PREDICTIVE PREFLIGHT", predictive_preview])
         lines.extend(["", "HISTORICAL PROCEDURAL HINTS (non-authoritative)"])
         if playbooks:
             for item in playbooks:
@@ -515,6 +563,7 @@ class MaintenancePlanner:
             "- Localize from current AST/graph evidence before editing.",
             "- Read exact targets and preserve digest preconditions.",
             "- Use historical playbooks only as strategy hints; never replay old patches blindly.",
+            "- Allocate inspection and validation effort from the predictive risk surface, but treat its score as uncalibrated planning priority rather than defect probability.",
             "- After every edit, inspect the semantic change fingerprint and expand validation when public/dependency surfaces changed.",
             "- A validator failure creates a new hypothesis; do not increase patch size merely to silence the failure.",
         ])
